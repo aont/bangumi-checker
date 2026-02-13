@@ -51,6 +51,10 @@ async def evaluate_event(metadata: dict) -> bool:
     return "アニメ" in (metadata.get("metadata_title") or "")
 ```
 
+
+A sample filter file is included as `my_filter.py`.
+It matches programs whose title includes `🈟` or `🈡` and sends notifications to Slack Incoming Webhook in `handle_matched_event` when `SLACK_WEBHOOK_URL` is set.
+
 The evaluator loads user code directly from the provided file path with cache invalidation and updates per-event execution state columns in SQLite:
 
 - `user_function_returned_true`
