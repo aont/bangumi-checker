@@ -59,7 +59,7 @@ async def evaluate_event(metadata: dict) -> bool:
 
 
 A sample filter file is included as `my_filter.py`.
-It matches programs whose title includes `🈟` or `🈡` and sends notifications to Slack Incoming Webhook in `handle_matched_event` when `SLACK_WEBHOOK_URL` is set.
+It matches programs whose title includes `🈟` or `🈡`, accumulates matched message text in `handle_matched_event`, and sends one combined Slack Incoming Webhook notification in `after_evaluate_events` when `SLACK_WEBHOOK_URL` is set.
 
 The evaluator loads user code directly from the provided file path with cache invalidation and updates per-event execution state columns in SQLite:
 
@@ -68,4 +68,8 @@ The evaluator loads user code directly from the provided file path with cache in
 - `user_function_never_executed`
 
 
-Optionally, `my_filter.py` can define async `handle_matched_event(program)` to receive the full program row for each match (for notifications such as Slack integrations).
+Optionally, `my_filter.py` can define these async hooks:
+
+- `before_evaluate_events()`: runs once before the first `evaluate_event` call.
+- `handle_matched_event(program)`: receives the full program row for each match (for notifications such as Slack integrations).
+- `after_evaluate_events()`: runs once after all `evaluate_event` calls have completed.

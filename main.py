@@ -404,7 +404,19 @@ def load_user_functions(code_path: str):
     if handle_matched_event is not None and not inspect.iscoroutinefunction(handle_matched_event):
         raise SystemExit("handle_matched_event must be defined as async def when provided")
 
-    return evaluate_event, handle_matched_event
+    before_evaluate_events = getattr(module, "before_evaluate_events", None)
+    if before_evaluate_events is not None and not callable(before_evaluate_events):
+        raise SystemExit("before_evaluate_events must be callable when defined")
+    if before_evaluate_events is not None and not inspect.iscoroutinefunction(before_evaluate_events):
+        raise SystemExit("before_evaluate_events must be defined as async def when provided")
+
+    after_evaluate_events = getattr(module, "after_evaluate_events", None)
+    if after_evaluate_events is not None and not callable(after_evaluate_events):
+        raise SystemExit("after_evaluate_events must be callable when defined")
+    if after_evaluate_events is not None and not inspect.iscoroutinefunction(after_evaluate_events):
+        raise SystemExit("after_evaluate_events must be defined as async def when provided")
+
+    return evaluate_event, handle_matched_event, before_evaluate_events, after_evaluate_events
 
 
 async def evaluate_broadcast_events(db_path: str, code_path: str, force: bool = False) -> None:
@@ -412,7 +424,9 @@ async def evaluate_broadcast_events(db_path: str, code_path: str, force: bool = 
     if not user_code.exists() or not user_code.is_file():
         raise SystemExit(f"--code-path must point to an existing file: {code_path}")
 
-    evaluate_event, handle_matched_event = load_user_functions(str(user_code.resolve()))
+    evaluate_event, handle_matched_event, before_evaluate_events, after_evaluate_events = load_user_functions(
+        str(user_code.resolve())
+    )
 
     async with aiosqlite.connect(db_path) as db:
         await ensure_db_schema(db)
@@ -430,6 +444,9 @@ async def evaluate_broadcast_events(db_path: str, code_path: str, force: bool = 
             rows = await cursor.fetchall()
 
         matched_count = 0
+        if before_evaluate_events is not None:
+            await before_evaluate_events()
+
         for row in rows:
             metadata = {k: row[k] for k in row.keys() if k.startswith("metadata_")}
             result = await evaluate_event(metadata)
@@ -467,6 +484,9 @@ async def evaluate_broadcast_events(db_path: str, code_path: str, force: bool = 
                         ensure_ascii=False,
                     )
                 )
+
+        if after_evaluate_events is not None:
+            await after_evaluate_events()
 
         await db.commit()
         summary_suffix = "(forced re-check enabled)" if force else "(excluding previously matched events)"
