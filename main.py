@@ -30,6 +30,7 @@ TERRESTRIAL_GROUPS = {
 DEFAULT_GGM_GROUP_IDS = [42]
 LOG_LEVEL_CHOICES = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LOGGER = logging.getLogger(__name__)
+SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 
 def configure_logging(log_level: str) -> None:
@@ -38,6 +39,14 @@ def configure_logging(log_level: str) -> None:
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+async def connect_db(db_path: str) -> aiosqlite.Connection:
+    db = await aiosqlite.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+    await db.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    await db.execute("PRAGMA journal_mode = WAL")
+    await db.execute("PRAGMA synchronous = NORMAL")
+    return db
 
 
 @dataclass
@@ -420,7 +429,7 @@ async def collect_for_dates(dates: list[str], db_path: str, timeout: int, ggm_gr
         )
 
     timeout_conf = aiohttp.ClientTimeout(total=timeout)
-    async with aiohttp.ClientSession(timeout=timeout_conf) as session, aiosqlite.connect(db_path) as db:
+    async with aiohttp.ClientSession(timeout=timeout_conf) as session, connect_db(db_path) as db:
         await ensure_db_schema(db)
         db.row_factory = aiosqlite.Row
 
@@ -447,7 +456,7 @@ def parse_detailed_description(raw_html: str) -> str:
 
 
 async def fetch_event_details(db_path: str, timeout: int, limit: Optional[int] = None) -> int:
-    async with aiosqlite.connect(db_path) as db:
+    async with connect_db(db_path) as db:
         await ensure_db_schema(db)
         db.row_factory = aiosqlite.Row
 
@@ -608,7 +617,7 @@ async def evaluate_broadcast_events(
         str(user_code.resolve())
     )
 
-    async with aiosqlite.connect(db_path) as db:
+    async with connect_db(db_path) as db:
         await ensure_db_schema(db)
         db.row_factory = aiosqlite.Row
 
