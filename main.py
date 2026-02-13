@@ -422,6 +422,7 @@ async def collect_for_dates(dates: list[str], db_path: str, timeout: int, ggm_gr
     timeout_conf = aiohttp.ClientTimeout(total=timeout)
     async with aiohttp.ClientSession(timeout=timeout_conf) as session, aiosqlite.connect(db_path) as db:
         await ensure_db_schema(db)
+        db.row_factory = aiosqlite.Row
 
         for index, req in enumerate(requests):
             if index > 0:
