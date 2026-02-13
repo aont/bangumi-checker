@@ -7,6 +7,7 @@ import importlib
 import importlib.util
 import inspect
 import json
+import logging
 import pathlib
 import random
 import sys
@@ -27,6 +28,16 @@ TERRESTRIAL_GROUPS = {
     45: "Kanagawa",
 }
 DEFAULT_GGM_GROUP_IDS = [42]
+LOG_LEVEL_CHOICES = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+LOGGER = logging.getLogger(__name__)
+
+
+def configure_logging(log_level: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper()),
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
 
 @dataclass
@@ -420,7 +431,7 @@ async def collect_for_dates(dates: list[str], db_path: str, timeout: int, ggm_gr
             rows = parse_event_rows(req, source_html)
             await store_rows(db, req, rows)
             area = f" group={req.ggm_group_id}" if req.ggm_group_id is not None else ""
-            print(f"stored {len(rows):4d} rows for {req.source_type}{area}")
+            LOGGER.info("stored %4d rows for %s%s", len(rows), req.source_type, area)
 
         await set_last_broadcast_events_fetched_at(db)
         await db.commit()
@@ -445,7 +456,7 @@ async def fetch_event_details(db_path: str, timeout: int, limit: Optional[int] =
             pending_count_row = await cursor.fetchone()
         pending_count = pending_count_row["c"] if pending_count_row else 0
         if pending_count == 0:
-            print("all items already have detailed information retrieved")
+            LOGGER.info("all items already have detailed information retrieved")
             return 0
 
         detail_select_sql = """
@@ -463,7 +474,7 @@ async def fetch_event_details(db_path: str, timeout: int, limit: Optional[int] =
                 targets = await cursor.fetchall()
 
         if not targets:
-            print("no rows found")
+            LOGGER.info("no rows found")
             return 0
 
         timeout_conf = aiohttp.ClientTimeout(total=timeout)
@@ -486,7 +497,7 @@ async def fetch_event_details(db_path: str, timeout: int, limit: Optional[int] =
                     """,
                     (detailed_description, row["id"]),
                 )
-                print(f"fetched detailed description for id={row['id']}")
+                LOGGER.info("fetched detailed description for id=%s", row["id"])
                 fetched_count += 1
 
         if fetched_count > 0:
@@ -515,21 +526,21 @@ async def periodic_update_and_evaluate(
             if run_once:
                 return
             if fetched_count == 0:
-                print("detail fetch worker idle; sleeping for 5 minutes")
+                LOGGER.info("detail fetch worker idle; sleeping for 5 minutes")
                 await asyncio.sleep(5 * 60)
 
     detail_worker = asyncio.create_task(detail_fetch_loop())
     try:
         while True:
             dates = upcoming_dates(7)
-            print(f"starting update cycle for dates {dates[0]} to {dates[-1]}")
+            LOGGER.info("starting update cycle for dates %s to %s", dates[0], dates[-1])
             for date in dates:
                 await collect_for_dates([date], db_path, timeout, ggm_group_ids)
                 await evaluate_broadcast_events(db_path, code_path, broadcast_dates=[date])
             if run_once:
                 await detail_worker
                 return
-            print(f"cycle complete; sleeping for {interval_hours} hours")
+            LOGGER.info("cycle complete; sleeping for %s hours", interval_hours)
             await asyncio.sleep(interval_hours * 60 * 60)
     finally:
         if not detail_worker.done():
@@ -647,7 +658,7 @@ async def evaluate_broadcast_events(
                 program = {k: row[k] for k in row.keys()}
                 if handle_matched_event is not None:
                     await handle_matched_event(program)
-                print(
+                LOGGER.info(
                     json.dumps(
                         {
                             "id": row["id"],
@@ -668,11 +679,17 @@ async def evaluate_broadcast_events(
 
         await db.commit()
         summary_suffix = "(forced re-check enabled)" if force else "(excluding previously matched events)"
-        print(f"matched {matched_count} / {len(rows)} events checked {summary_suffix}")
+        LOGGER.info("matched %s / %s events checked %s", matched_count, len(rows), summary_suffix)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Bangumi checker CLI")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=LOG_LEVEL_CHOICES,
+        help="Log level (default: INFO)",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     fetch_parser = subparsers.add_parser(
@@ -755,6 +772,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    configure_logging(args.log_level)
     if args.command in {"fetch-broadcast-events", "fetch"}:
         date = args.date or datetime.date.today().strftime("%Y%m%d")
         if len(date) != 8 or not date.isdigit():

@@ -15,6 +15,7 @@ Fetch and store events (`--date` omitted then today):
 ```bash
 python main.py fetch-broadcast-events --db broadcast_events.sqlite3
 python main.py fetch-broadcast-events --date 20260213 --db broadcast_events.sqlite3
+python main.py --log-level DEBUG fetch-broadcast-events --date 20260213 --db broadcast_events.sqlite3
 ```
 
 The fetch command retrieves:
@@ -90,6 +91,9 @@ Optionally, `my_filter.py` can define these async hooks:
 - `before_evaluate_events()`: runs once before the first `evaluate_event` call.
 - `handle_matched_event(program)`: receives the full program row for each match (for notifications such as Slack integrations).
 - `after_evaluate_events()`: runs once after all `evaluate_event` calls have completed.
+
+
+All logs include timestamps, and the global log level can be controlled via `--log-level` (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`).
 
 ## User-defined function I/O specification
 
