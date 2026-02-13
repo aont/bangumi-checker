@@ -111,6 +111,15 @@ def parse_channel_names(tree: html.HtmlElement) -> list[str]:
     return channels
 
 
+def normalize_li_timestamp(raw_value: Optional[str]) -> Optional[str]:
+    if not raw_value:
+        return raw_value
+    value = raw_value.strip()
+    if len(value) == 12 and value.isdigit():
+        return f"{value[0:4]}-{value[4:6]}-{value[6:8]} {value[8:10]}:{value[10:12]}:00"
+    return value
+
+
 def parse_event_rows(req: SourceRequest, raw_html: str) -> list[dict]:
     tree = html.fromstring(raw_html)
     channels = parse_channel_names(tree)
@@ -179,8 +188,8 @@ def parse_event_rows(req: SourceRequest, raw_html: str) -> list[dict]:
                     "event_url": abs_url,
                     "li_program_id": li.get("pid"),
                     "li_service_event_id": li.get("se-id"),
-                    "li_start_at": li.get("s"),
-                    "li_end_at": li.get("e"),
+                    "li_start_at": normalize_li_timestamp(li.get("s")),
+                    "li_end_at": normalize_li_timestamp(li.get("e")),
                     "slot_minute": time_text,
                     "title": " ".join(title_node[0].itertext()).strip() if title_node else None,
                     "detail": " ".join(detail_node[0].itertext()).strip() if detail_node else None,
@@ -203,7 +212,7 @@ def _parse_li_end_at(li_end_at: Optional[str]) -> Optional[datetime.datetime]:
     if not li_end_at:
         return None
     normalized = li_end_at.strip().replace("T", " ")
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y%m%d %H%M", "%Y%m%d%H%M"):
         try:
             return datetime.datetime.strptime(normalized, fmt)
         except ValueError:
