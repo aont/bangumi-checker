@@ -33,6 +33,7 @@ LOGGER = logging.getLogger(__name__)
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 PRAGMA_RETRY_COUNT = 5
 PRAGMA_RETRY_DELAY_SECONDS = 0.2
+DETAIL_FETCH_IDLE_SLEEP_SECONDS = 60
 
 
 def configure_logging(log_level: str) -> None:
@@ -576,8 +577,11 @@ async def periodic_update_and_evaluate(
             if run_once:
                 return
             if fetched_count == 0:
-                LOGGER.info("detail fetch worker idle; sleeping for 5 minutes")
-                await asyncio.sleep(5 * 60)
+                LOGGER.info(
+                    "detail fetch worker idle; sleeping for %s seconds",
+                    DETAIL_FETCH_IDLE_SLEEP_SECONDS,
+                )
+                await asyncio.sleep(DETAIL_FETCH_IDLE_SLEEP_SECONDS)
 
     detail_worker = asyncio.create_task(detail_fetch_loop())
     try:
