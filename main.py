@@ -199,6 +199,31 @@ def parse_event_rows(req: SourceRequest, raw_html: str) -> list[dict]:
     return rows
 
 
+def _parse_li_end_at(li_end_at: Optional[str]) -> Optional[datetime.datetime]:
+    if not li_end_at:
+        return None
+    normalized = li_end_at.strip().replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.datetime.strptime(normalized, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def is_not_finished_event(row: dict, now: Optional[datetime.datetime] = None) -> bool:
+    end_at = _parse_li_end_at(row.get("li_end_at"))
+    if end_at is None:
+        return True
+    current = now or datetime.datetime.now()
+    return end_at > current
+
+
+def filter_active_rows(rows: list[dict], now: Optional[datetime.datetime] = None) -> list[dict]:
+    current = now or datetime.datetime.now()
+    return [row for row in rows if is_not_finished_event(row, current)]
+
+
 async def init_db(db: aiosqlite.Connection) -> None:
     await db.execute("DROP TABLE IF EXISTS broadcast_events")
     await ensure_db_schema(db)
@@ -475,6 +500,7 @@ async def collect_for_dates(
 
             source_html = await fetch_html(session, req)
             rows = parse_event_rows(req, source_html)
+            rows = filter_active_rows(rows)
             await store_rows(db, req, rows)
             area = f" group={req.ggm_group_id}" if req.ggm_group_id is not None else ""
             LOGGER.info("stored %4d rows for %s%s", len(rows), req.source_type, area)
@@ -503,6 +529,17 @@ def extract_event_token(event_url: Optional[str]) -> Optional[str]:
 async def fetch_event_details(db: aiosqlite.Connection, timeout: int, limit: Optional[int] = None) -> int:
     await ensure_db_schema(db)
     db.row_factory = aiosqlite.Row
+
+    await db.execute(
+        """
+        DELETE FROM broadcast_events
+        WHERE event_url IS NOT NULL
+          AND detail_fetched_at IS NULL
+          AND datetime(li_end_at) IS NOT NULL
+          AND datetime(li_end_at) <= datetime('now', 'localtime')
+        """
+    )
+    await db.commit()
 
     async with db.execute(
             """
