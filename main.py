@@ -34,6 +34,13 @@ SQLITE_BUSY_TIMEOUT_MS = 30_000
 PRAGMA_RETRY_COUNT = 5
 PRAGMA_RETRY_DELAY_SECONDS = 0.2
 DETAIL_FETCH_IDLE_SLEEP_SECONDS = 60
+ACTIVE_BROADCAST_CONDITION = """
+(
+    li_end_at IS NULL
+    OR datetime(li_end_at) IS NULL
+    OR datetime(li_end_at) > datetime('now', 'localtime')
+)
+"""
 
 
 def configure_logging(log_level: str) -> None:
@@ -501,8 +508,11 @@ async def fetch_event_details(db: aiosqlite.Connection, timeout: int, limit: Opt
             """
             SELECT COUNT(*) AS c
             FROM broadcast_events
-            WHERE event_url IS NOT NULL AND detail_fetched_at IS NULL
+            WHERE event_url IS NOT NULL
+              AND detail_fetched_at IS NULL
+              AND
             """
+            + ACTIVE_BROADCAST_CONDITION
     ) as cursor:
         pending_count_row = await cursor.fetchone()
     pending_count = pending_count_row["c"] if pending_count_row else 0
@@ -513,7 +523,10 @@ async def fetch_event_details(db: aiosqlite.Connection, timeout: int, limit: Opt
     detail_select_sql = """
         SELECT id, event_url, event_id
         FROM broadcast_events
-        WHERE event_url IS NOT NULL AND detail_fetched_at IS NULL
+        WHERE event_url IS NOT NULL
+          AND detail_fetched_at IS NULL
+          AND
+    """ + ACTIVE_BROADCAST_CONDITION + """
         ORDER BY COALESCE(detail_fetched_at, '1970-01-01 00:00:00') ASC, li_start_at ASC
     """
     if limit is not None:
@@ -682,6 +695,7 @@ async def evaluate_broadcast_events(
     params: list[object] = []
     if not force:
         where_conditions.append("needs_user_evaluation = 1")
+    where_conditions.append(ACTIVE_BROADCAST_CONDITION)
     if broadcast_dates:
         placeholders = ",".join("?" for _ in broadcast_dates)
         where_conditions.append(f"broadcast_date IN ({placeholders})")
