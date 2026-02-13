@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import contextlib
 import datetime
 import importlib
 import importlib.util
@@ -185,6 +186,7 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
             user_function_returned_true INTEGER NOT NULL DEFAULT 0,
             user_function_returned_false INTEGER NOT NULL DEFAULT 0,
             user_function_never_executed INTEGER NOT NULL DEFAULT 1,
+            needs_user_evaluation INTEGER NOT NULL DEFAULT 1,
             detailed_description TEXT NOT NULL DEFAULT '',
             detail_fetched_at TEXT,
             inserted_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -205,11 +207,18 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
         await db.execute(
             "ALTER TABLE broadcast_events ADD COLUMN user_function_never_executed INTEGER NOT NULL DEFAULT 1"
         )
+    if "needs_user_evaluation" not in existing_columns:
+        await db.execute(
+            "ALTER TABLE broadcast_events ADD COLUMN needs_user_evaluation INTEGER NOT NULL DEFAULT 1"
+        )
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_broadcast_events_lookup ON broadcast_events(source_type, broadcast_date, ggm_group_id)"
     )
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_broadcast_events_detail_fetch ON broadcast_events(detail_fetched_at, li_start_at)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_broadcast_events_eval_queue ON broadcast_events(needs_user_evaluation, broadcast_date)"
     )
     await db.execute(
         """
@@ -241,45 +250,139 @@ async def set_last_event_detail_fetched_at(db: aiosqlite.Connection) -> None:
     )
 
 
-async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[dict]) -> None:
-    await db.execute(
-        "DELETE FROM broadcast_events WHERE source_type = ? AND broadcast_date = ? AND ((ggm_group_id IS NULL AND ? IS NULL) OR ggm_group_id = ?)",
-        (req.source_type, req.broadcast_date, req.ggm_group_id, req.ggm_group_id),
+EVENT_COMPARE_FIELDS = [
+    "channel_name",
+    "event_id",
+    "event_url",
+    "li_end_at",
+    "slot_minute",
+    "title",
+    "detail",
+    "schedule_class",
+    "genre_class",
+    "style_top_px",
+    "style_height_px",
+    "metadata_title",
+    "metadata_contents_id",
+    "metadata_program_id",
+    "metadata_program_date",
+    "metadata_href",
+    "metadata_detail",
+]
+
+
+def row_identity_key(row: dict) -> tuple:
+    return (
+        row.get("event_id") or "",
+        row.get("li_service_event_id") or "",
+        row.get("li_program_id") or "",
+        row.get("li_start_at") or "",
+        row.get("channel_index") or -1,
     )
 
-    if rows:
-        await db.executemany(
-            """
-            INSERT INTO broadcast_events (
-                source_type, broadcast_date, ggm_group_id,
-                channel_index, channel_name,
-                event_id, event_url,
-                li_program_id, li_service_event_id,
-                li_start_at, li_end_at,
-                slot_minute, title, detail,
-                schedule_class, genre_class,
-                style_top_px, style_height_px,
+
+def has_row_changed(new_row: dict, existing_row: aiosqlite.Row) -> bool:
+    for key in EVENT_COMPARE_FIELDS:
+        if new_row.get(key) != existing_row[key]:
+            return True
+    return False
+
+
+async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[dict]) -> None:
+    async with db.execute(
+        """
+        SELECT *
+        FROM broadcast_events
+        WHERE source_type = ?
+          AND broadcast_date = ?
+          AND ((ggm_group_id IS NULL AND ? IS NULL) OR ggm_group_id = ?)
+        """,
+        (req.source_type, req.broadcast_date, req.ggm_group_id, req.ggm_group_id),
+    ) as cursor:
+        existing_rows = await cursor.fetchall()
+
+    existing_by_key = {row_identity_key(dict(row)): row for row in existing_rows}
+    incoming_keys = {row_identity_key(row) for row in rows}
+
+    for key, existing_row in existing_by_key.items():
+        if key in incoming_keys:
+            continue
+        await db.execute("DELETE FROM broadcast_events WHERE id = ?", (existing_row["id"],))
+
+    for row in rows:
+        key = row_identity_key(row)
+        existing_row = existing_by_key.get(key)
+        if existing_row is None:
+            await db.execute(
+                """
+                INSERT INTO broadcast_events (
+                    source_type, broadcast_date, ggm_group_id,
+                    channel_index, channel_name,
+                    event_id, event_url,
+                    li_program_id, li_service_event_id,
+                    li_start_at, li_end_at,
+                    slot_minute, title, detail,
+                    schedule_class, genre_class,
+                    style_top_px, style_height_px,
                     metadata_title, metadata_contents_id,
                     metadata_program_id, metadata_program_date,
                     metadata_href, metadata_detail,
-                    detailed_description
-            ) VALUES (
-                :source_type, :broadcast_date, :ggm_group_id,
-                :channel_index, :channel_name,
-                :event_id, :event_url,
-                :li_program_id, :li_service_event_id,
-                :li_start_at, :li_end_at,
-                :slot_minute, :title, :detail,
-                :schedule_class, :genre_class,
-                :style_top_px, :style_height_px,
+                    detailed_description,
+                    needs_user_evaluation
+                ) VALUES (
+                    :source_type, :broadcast_date, :ggm_group_id,
+                    :channel_index, :channel_name,
+                    :event_id, :event_url,
+                    :li_program_id, :li_service_event_id,
+                    :li_start_at, :li_end_at,
+                    :slot_minute, :title, :detail,
+                    :schedule_class, :genre_class,
+                    :style_top_px, :style_height_px,
                     :metadata_title, :metadata_contents_id,
                     :metadata_program_id, :metadata_program_date,
                     :metadata_href, :metadata_detail,
-                    ''
+                    '',
+                    1
+                )
+                """,
+                row,
             )
-            """,
-            rows,
-        )
+            continue
+
+        if has_row_changed(row, existing_row):
+            await db.execute(
+                """
+                UPDATE broadcast_events
+                SET channel_name = :channel_name,
+                    event_id = :event_id,
+                    event_url = :event_url,
+                    li_program_id = :li_program_id,
+                    li_service_event_id = :li_service_event_id,
+                    li_start_at = :li_start_at,
+                    li_end_at = :li_end_at,
+                    slot_minute = :slot_minute,
+                    title = :title,
+                    detail = :detail,
+                    schedule_class = :schedule_class,
+                    genre_class = :genre_class,
+                    style_top_px = :style_top_px,
+                    style_height_px = :style_height_px,
+                    metadata_title = :metadata_title,
+                    metadata_contents_id = :metadata_contents_id,
+                    metadata_program_id = :metadata_program_id,
+                    metadata_program_date = :metadata_program_date,
+                    metadata_href = :metadata_href,
+                    metadata_detail = :metadata_detail,
+                    detail_fetched_at = NULL,
+                    detailed_description = '',
+                    user_function_returned_true = 0,
+                    user_function_returned_false = 0,
+                    user_function_never_executed = 1,
+                    needs_user_evaluation = 1
+                WHERE id = :id
+                """,
+                {**row, "id": existing_row["id"]},
+            )
 
     await db.commit()
 
@@ -331,7 +434,7 @@ def parse_detailed_description(raw_html: str) -> str:
     return " ".join(detail[0].itertext()).strip()
 
 
-async def fetch_event_details(db_path: str, limit: int, timeout: int) -> None:
+async def fetch_event_details(db_path: str, timeout: int, limit: Optional[int] = None) -> int:
     async with aiosqlite.connect(db_path) as db:
         await ensure_db_schema(db)
         db.row_factory = aiosqlite.Row
@@ -343,23 +446,25 @@ async def fetch_event_details(db_path: str, limit: int, timeout: int) -> None:
         pending_count = pending_count_row["c"] if pending_count_row else 0
         if pending_count == 0:
             print("all items already have detailed information retrieved")
-            return
+            return 0
 
-        async with db.execute(
-            """
+        detail_select_sql = """
             SELECT id, event_url
             FROM broadcast_events
             WHERE event_url IS NOT NULL AND detail_fetched_at IS NULL
             ORDER BY COALESCE(detail_fetched_at, '1970-01-01 00:00:00') ASC, li_start_at ASC
-            LIMIT ?
-            """,
-            (limit,),
-        ) as cursor:
-            targets = await cursor.fetchall()
+        """
+        if limit is not None:
+            detail_select_sql += " LIMIT ?"
+            async with db.execute(detail_select_sql, (limit,)) as cursor:
+                targets = await cursor.fetchall()
+        else:
+            async with db.execute(detail_select_sql) as cursor:
+                targets = await cursor.fetchall()
 
         if not targets:
             print("no rows found")
-            return
+            return 0
 
         timeout_conf = aiohttp.ClientTimeout(total=timeout)
         fetched_count = 0
@@ -388,6 +493,7 @@ async def fetch_event_details(db_path: str, limit: int, timeout: int) -> None:
             await set_last_event_detail_fetched_at(db)
 
         await db.commit()
+        return fetched_count
 
 
 def upcoming_dates(days_ahead: int = 7) -> list[str]:
@@ -400,20 +506,36 @@ async def periodic_update_and_evaluate(
     timeout: int,
     ggm_group_ids: list[int],
     code_path: str,
-    detail_limit: int,
     interval_hours: int,
     run_once: bool,
 ) -> None:
-    while True:
-        dates = upcoming_dates(7)
-        print(f"starting update cycle for dates {dates[0]} to {dates[-1]}")
-        await collect_for_dates(dates, db_path, timeout, ggm_group_ids)
-        await fetch_event_details(db_path, detail_limit, timeout)
-        await evaluate_broadcast_events(db_path, code_path)
-        if run_once:
-            return
-        print(f"cycle complete; sleeping for {interval_hours} hours")
-        await asyncio.sleep(interval_hours * 60 * 60)
+    async def detail_fetch_loop() -> None:
+        while True:
+            fetched_count = await fetch_event_details(db_path, timeout)
+            if run_once:
+                return
+            if fetched_count == 0:
+                print("detail fetch worker idle; sleeping for 5 minutes")
+                await asyncio.sleep(5 * 60)
+
+    detail_worker = asyncio.create_task(detail_fetch_loop())
+    try:
+        while True:
+            dates = upcoming_dates(7)
+            print(f"starting update cycle for dates {dates[0]} to {dates[-1]}")
+            for date in dates:
+                await collect_for_dates([date], db_path, timeout, ggm_group_ids)
+                await evaluate_broadcast_events(db_path, code_path, broadcast_dates=[date])
+            if run_once:
+                await detail_worker
+                return
+            print(f"cycle complete; sleeping for {interval_hours} hours")
+            await asyncio.sleep(interval_hours * 60 * 60)
+    finally:
+        if not detail_worker.done():
+            detail_worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await detail_worker
 
 
 def load_user_functions(code_path: str):
@@ -460,7 +582,12 @@ def load_user_functions(code_path: str):
     return evaluate_event, handle_matched_event, before_evaluate_events, after_evaluate_events
 
 
-async def evaluate_broadcast_events(db_path: str, code_path: str, force: bool = False) -> None:
+async def evaluate_broadcast_events(
+    db_path: str,
+    code_path: str,
+    force: bool = False,
+    broadcast_dates: Optional[list[str]] = None,
+) -> None:
     user_code = pathlib.Path(code_path)
     if not user_code.exists() or not user_code.is_file():
         raise SystemExit(f"--code-path must point to an existing file: {code_path}")
@@ -473,14 +600,23 @@ async def evaluate_broadcast_events(db_path: str, code_path: str, force: bool = 
         await ensure_db_schema(db)
         db.row_factory = aiosqlite.Row
 
-        where_clause = "" if force else "WHERE user_function_returned_true = 0"
+        where_conditions: list[str] = []
+        params: list[object] = []
+        if not force:
+            where_conditions.append("needs_user_evaluation = 1")
+        if broadcast_dates:
+            placeholders = ",".join("?" for _ in broadcast_dates)
+            where_conditions.append(f"broadcast_date IN ({placeholders})")
+            params.extend(broadcast_dates)
+        where_clause = f"WHERE {' AND '.join(where_conditions)}" if where_conditions else ""
         async with db.execute(
             f"""
             SELECT *
             FROM broadcast_events
             {where_clause}
             ORDER BY source_type, COALESCE(ggm_group_id, -1), channel_index, li_start_at
-            """
+            """,
+            params,
         ) as cursor:
             rows = await cursor.fetchall()
 
@@ -499,7 +635,8 @@ async def evaluate_broadcast_events(db_path: str, code_path: str, force: bool = 
                 UPDATE broadcast_events
                 SET user_function_returned_true = ?,
                     user_function_returned_false = ?,
-                    user_function_never_executed = 0
+                    user_function_never_executed = 0,
+                    needs_user_evaluation = 0
                 WHERE id = ?
                 """,
                 (1 if result else 0, 0 if result else 1, row["id"]),
@@ -584,7 +721,7 @@ def parse_args() -> argparse.Namespace:
     periodic_parser = subparsers.add_parser(
         "periodic-update",
         aliases=["watch", "periodic"],
-        help="Periodically refresh one week of events, fetch details, and run user checks",
+        help="Periodically refresh one week of events and run user checks while details are fetched asynchronously",
     )
     periodic_parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
     periodic_parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout in seconds")
@@ -600,12 +737,6 @@ def parse_args() -> argparse.Namespace:
         "--code-path",
         required=True,
         help="Path to Python file defining async evaluate_event(metadata) -> bool",
-    )
-    periodic_parser.add_argument(
-        "--detail-limit",
-        type=int,
-        default=300,
-        help="Max detail pages to fetch per cycle",
     )
     periodic_parser.add_argument(
         "--interval-hours",
@@ -644,7 +775,7 @@ def main() -> None:
     }:
         if args.limit <= 0:
             raise SystemExit("--limit must be greater than 0")
-        asyncio.run(fetch_event_details(args.db, args.limit, args.timeout))
+        asyncio.run(fetch_event_details(args.db, args.timeout, args.limit))
         return
 
     if args.command in {"evaluate-broadcast-events", "eval"}:
@@ -660,15 +791,12 @@ def main() -> None:
             raise SystemExit(f"unsupported --ggm-group-id: {invalid} (supported: {supported})")
         if args.interval_hours <= 0:
             raise SystemExit("--interval-hours must be greater than 0")
-        if args.detail_limit <= 0:
-            raise SystemExit("--detail-limit must be greater than 0")
         asyncio.run(
             periodic_update_and_evaluate(
                 db_path=args.db,
                 timeout=args.timeout,
                 ggm_group_ids=group_ids,
                 code_path=args.code_path,
-                detail_limit=args.detail_limit,
                 interval_hours=args.interval_hours,
                 run_once=args.once,
             )

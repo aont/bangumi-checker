@@ -40,7 +40,7 @@ python main.py fetch-broadcast-event-details --db broadcast_events.sqlite3 --lim
 
 Detailed information is fetched one event at a time with a random 10-20 second interval between requests.
 
-Evaluate stored events with user-provided async code and print only events where `await evaluate_event(metadata)` returns `True`. By default, only events that have not previously matched (`user_function_returned_true = 0`) are checked:
+Evaluate stored events with user-provided async code and print only events where `await evaluate_event(metadata)` returns `True`. By default, only events flagged as needing evaluation (newly inserted or updated rows) are checked:
 
 ```bash
 python main.py evaluate-broadcast-events --db broadcast_events.sqlite3 --code-path ./my_filter.py
@@ -52,7 +52,7 @@ To force re-check all stored events regardless of previous `evaluate_event` resu
 python main.py evaluate-broadcast-events --db broadcast_events.sqlite3 --code-path ./my_filter.py --force
 ```
 
-Run periodic updates (every 3 hours by default), collecting broadcast event lists from today through one week ahead, then fetch event details and run the user-defined evaluator:
+Run periodic updates (every 3 hours by default), collecting broadcast event lists from today through one week ahead. For each target day, the user-defined evaluator (including before/after hooks) runs right after that day's list retrieval completes. Event detail retrieval runs in a separate asynchronous worker and progresses independently for all pending programs:
 
 ```bash
 python main.py periodic-update --db broadcast_events.sqlite3 --code-path ./my_filter.py
@@ -82,6 +82,7 @@ The evaluator loads user code directly from the provided file path with cache in
 - `user_function_returned_true`
 - `user_function_returned_false`
 - `user_function_never_executed`
+- `needs_user_evaluation`
 
 
 Optionally, `my_filter.py` can define these async hooks:
