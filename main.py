@@ -4,6 +4,7 @@ import asyncio
 import datetime
 import importlib
 import importlib.util
+import inspect
 import json
 import pathlib
 import sys
@@ -382,11 +383,15 @@ def load_user_functions(code_path: str):
 
     evaluate_event = getattr(module, "evaluate_event", None)
     if not callable(evaluate_event):
-        raise SystemExit("user code must define callable: evaluate_event(metadata) -> bool")
+        raise SystemExit("user code must define callable: async evaluate_event(metadata) -> bool")
+    if not inspect.iscoroutinefunction(evaluate_event):
+        raise SystemExit("evaluate_event must be defined as async def")
 
     handle_matched_event = getattr(module, "handle_matched_event", None)
     if handle_matched_event is not None and not callable(handle_matched_event):
         raise SystemExit("handle_matched_event must be callable when defined")
+    if handle_matched_event is not None and not inspect.iscoroutinefunction(handle_matched_event):
+        raise SystemExit("handle_matched_event must be defined as async def when provided")
 
     return evaluate_event, handle_matched_event
 
@@ -415,7 +420,7 @@ async def evaluate_broadcast_events(db_path: str, code_path: str) -> None:
         matched_count = 0
         for row in rows:
             metadata = {k: row[k] for k in row.keys() if k.startswith("metadata_")}
-            result = evaluate_event(metadata)
+            result = await evaluate_event(metadata)
             if not isinstance(result, bool):
                 raise SystemExit(f"evaluate_event must return bool (event id={row['id']})")
 
@@ -434,7 +439,7 @@ async def evaluate_broadcast_events(db_path: str, code_path: str) -> None:
                 matched_count += 1
                 program = {k: row[k] for k in row.keys()}
                 if handle_matched_event is not None:
-                    handle_matched_event(program)
+                    await handle_matched_event(program)
                 print(
                     json.dumps(
                         {
@@ -491,7 +496,7 @@ def parse_args() -> argparse.Namespace:
     evaluate_parser.add_argument(
         "--code-path",
         required=True,
-        help="Path to Python file defining evaluate_event(metadata) -> bool",
+        help="Path to Python file defining async evaluate_event(metadata) -> bool",
     )
 
     return parser.parse_args()
