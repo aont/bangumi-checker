@@ -2,7 +2,12 @@
 import argparse
 import asyncio
 import datetime
+import importlib
+import importlib.util
 import json
+import pathlib
+import sys
+import uuid
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urljoin, urlparse
@@ -167,12 +172,29 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
             metadata_program_date TEXT,
             metadata_href TEXT,
             metadata_detail TEXT,
+            user_function_returned_true INTEGER NOT NULL DEFAULT 0,
+            user_function_returned_false INTEGER NOT NULL DEFAULT 0,
+            user_function_never_executed INTEGER NOT NULL DEFAULT 1,
             detailed_description TEXT NOT NULL DEFAULT '',
             detail_fetched_at TEXT,
             inserted_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
         """
     )
+    async with db.execute("PRAGMA table_info(broadcast_events)") as cursor:
+        existing_columns = {row[1] for row in await cursor.fetchall()}
+    if "user_function_returned_true" not in existing_columns:
+        await db.execute(
+            "ALTER TABLE broadcast_events ADD COLUMN user_function_returned_true INTEGER NOT NULL DEFAULT 0"
+        )
+    if "user_function_returned_false" not in existing_columns:
+        await db.execute(
+            "ALTER TABLE broadcast_events ADD COLUMN user_function_returned_false INTEGER NOT NULL DEFAULT 0"
+        )
+    if "user_function_never_executed" not in existing_columns:
+        await db.execute(
+            "ALTER TABLE broadcast_events ADD COLUMN user_function_never_executed INTEGER NOT NULL DEFAULT 1"
+        )
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_broadcast_events_lookup ON broadcast_events(source_type, broadcast_date, ggm_group_id)"
     )
@@ -341,6 +363,89 @@ async def fetch_event_details(db_path: str, limit: int, timeout: int) -> None:
         await db.commit()
 
 
+def load_user_function(code_path: str):
+    importlib.invalidate_caches()
+    module_name = f"user_filter_{uuid.uuid4().hex}"
+    module_spec = importlib.util.spec_from_file_location(module_name, code_path)
+    if module_spec is None or module_spec.loader is None:
+        raise SystemExit(f"failed to load user code from: {code_path}")
+
+    module = importlib.util.module_from_spec(module_spec)
+    sys.modules[module_name] = module
+    original_dont_write_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        module_spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(module_name, None)
+        sys.dont_write_bytecode = original_dont_write_bytecode
+
+    evaluate_event = getattr(module, "evaluate_event", None)
+    if not callable(evaluate_event):
+        raise SystemExit("user code must define callable: evaluate_event(metadata) -> bool")
+    return evaluate_event
+
+
+async def evaluate_broadcast_events(db_path: str, code_path: str) -> None:
+    user_code = pathlib.Path(code_path)
+    if not user_code.exists() or not user_code.is_file():
+        raise SystemExit(f"--code-path must point to an existing file: {code_path}")
+
+    evaluate_event = load_user_function(str(user_code.resolve()))
+
+    async with aiosqlite.connect(db_path) as db:
+        await ensure_db_schema(db)
+        db.row_factory = aiosqlite.Row
+
+        async with db.execute(
+            """
+            SELECT *
+            FROM broadcast_events
+            ORDER BY source_type, COALESCE(ggm_group_id, -1), channel_index, li_start_at
+            """
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        matched_count = 0
+        for row in rows:
+            metadata = {k: row[k] for k in row.keys() if k.startswith("metadata_")}
+            result = evaluate_event(metadata)
+            if not isinstance(result, bool):
+                raise SystemExit(f"evaluate_event must return bool (event id={row['id']})")
+
+            await db.execute(
+                """
+                UPDATE broadcast_events
+                SET user_function_returned_true = ?,
+                    user_function_returned_false = ?,
+                    user_function_never_executed = 0
+                WHERE id = ?
+                """,
+                (1 if result else 0, 0 if result else 1, row["id"]),
+            )
+
+            if result:
+                matched_count += 1
+                print(
+                    json.dumps(
+                        {
+                            "id": row["id"],
+                            "source_type": row["source_type"],
+                            "broadcast_date": row["broadcast_date"],
+                            "channel_name": row["channel_name"],
+                            "slot_minute": row["slot_minute"],
+                            "title": row["title"],
+                            "event_url": row["event_url"],
+                            "metadata": metadata,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+
+        await db.commit()
+        print(f"matched {matched_count} / {len(rows)} events")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Bangumi checker CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -369,6 +474,17 @@ def parse_args() -> argparse.Namespace:
     fetch_detail_parser.add_argument("--limit", type=int, default=50, help="Max rows to fetch")
     fetch_detail_parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout in seconds")
 
+    evaluate_parser = subparsers.add_parser(
+        "evaluate-broadcast-events",
+        help="Evaluate broadcast events with user code and print rows returning True",
+    )
+    evaluate_parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
+    evaluate_parser.add_argument(
+        "--code-path",
+        required=True,
+        help="Path to Python file defining evaluate_event(metadata) -> bool",
+    )
+
     return parser.parse_args()
 
 
@@ -391,6 +507,10 @@ def main() -> None:
         if args.limit <= 0:
             raise SystemExit("--limit must be greater than 0")
         asyncio.run(fetch_event_details(args.db, args.limit, args.timeout))
+        return
+
+    if args.command == "evaluate-broadcast-events":
+        asyncio.run(evaluate_broadcast_events(args.db, args.code_path))
         return
 
     raise SystemExit(f"unknown command: {args.command}")

@@ -31,3 +31,28 @@ python main.py fetch-broadcast-events --date 20260213 --ggm-group-id 42 --ggm-gr
 
 For each page it parses `#contents > #program_area > ul > li` and stores extracted metadata.
 When run again with the same date/source, previous rows are deleted and replaced.
+
+Fetch detailed descriptions for stored events:
+
+```bash
+python main.py fetch-broadcast-event-details --db broadcast_events.sqlite3 --limit 50
+```
+
+Evaluate stored events with user-provided code and print only events where `evaluate_event(metadata)` returns `True`:
+
+```bash
+python main.py evaluate-broadcast-events --db broadcast_events.sqlite3 --code-path ./my_filter.py
+```
+
+`my_filter.py` must define:
+
+```python
+def evaluate_event(metadata: dict) -> bool:
+    return "アニメ" in (metadata.get("metadata_title") or "")
+```
+
+The evaluator loads user code directly from the provided file path with cache invalidation and updates per-event execution state columns in SQLite:
+
+- `user_function_returned_true`
+- `user_function_returned_false`
+- `user_function_never_executed`
