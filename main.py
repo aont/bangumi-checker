@@ -788,7 +788,7 @@ async def evaluate_broadcast_events(
         SELECT *
         FROM broadcast_events
         {where_clause}
-        ORDER BY source_type, COALESCE(ggm_group_id, -1), channel_index, li_start_at
+        ORDER BY COALESCE(li_start_at, 253402300799), source_type, COALESCE(ggm_group_id, -1), channel_index, id
         """,
         params,
     ) as cursor:
