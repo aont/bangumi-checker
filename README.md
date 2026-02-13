@@ -89,3 +89,33 @@ Optionally, `my_filter.py` can define these async hooks:
 - `before_evaluate_events()`: runs once before the first `evaluate_event` call.
 - `handle_matched_event(program)`: receives the full program row for each match (for notifications such as Slack integrations).
 - `after_evaluate_events()`: runs once after all `evaluate_event` calls have completed.
+
+## User-defined function I/O specification
+
+### `evaluate_event(metadata: dict) -> bool`
+
+- **Input**: `metadata` is a dictionary that includes only keys starting with `metadata_` from the `broadcast_events` row.
+- **Output**: must return `True` or `False`.
+
+`metadata` keys:
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `metadata_title` | `str \| None` | Program title parsed from `data-content.title`. |
+| `metadata_contents_id` | `int \| None` | Contents ID parsed from `data-content.contentsId`. |
+| `metadata_program_id` | `str \| None` | Program ID parsed from `data-content.programId`. |
+| `metadata_program_date` | `str \| None` | Program date parsed from `data-content.programDate`. |
+| `metadata_href` | `str \| None` | Relative link from `a.title_link[href]` (example: `/tv_events/...`). |
+| `metadata_detail` | `str \| None` | Summary/detail text extracted from `.detail` block on the list page. |
+
+### Optional hooks
+
+#### `handle_matched_event(program: dict) -> None`
+
+- **Input**: full SQLite row as a dictionary (`SELECT * FROM broadcast_events`).
+- Useful when you need non-`metadata_*` fields such as `channel_name`, `li_start_at`, `title`, `event_url`, or `detailed_description`.
+
+#### `before_evaluate_events() -> None` / `after_evaluate_events() -> None`
+
+- No arguments, no return value.
+- Run once before/after the evaluation loop.
