@@ -41,12 +41,16 @@ def configure_logging(log_level: str) -> None:
     )
 
 
-async def connect_db(db_path: str) -> aiosqlite.Connection:
+@contextlib.asynccontextmanager
+async def connect_db(db_path: str):
     db = await aiosqlite.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
-    await db.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
-    await db.execute("PRAGMA journal_mode = WAL")
-    await db.execute("PRAGMA synchronous = NORMAL")
-    return db
+    try:
+        await db.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        await db.execute("PRAGMA journal_mode = WAL")
+        await db.execute("PRAGMA synchronous = NORMAL")
+        yield db
+    finally:
+        await db.close()
 
 
 @dataclass
