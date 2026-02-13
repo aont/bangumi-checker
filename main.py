@@ -534,13 +534,13 @@ async def fetch_event_details(db_path: str, timeout: int, limit: Optional[int] =
                     """,
                     (detailed_description, row["id"]),
                 )
+                await db.commit()
                 LOGGER.info("fetched detailed description for id=%s", row["id"])
                 fetched_count += 1
 
         if fetched_count > 0:
             await set_last_event_detail_fetched_at(db)
-
-        await db.commit()
+            await db.commit()
         return fetched_count
 
 
