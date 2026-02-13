@@ -583,6 +583,7 @@ def parse_args() -> argparse.Namespace:
 
     periodic_parser = subparsers.add_parser(
         "periodic-update",
+        aliases=["watch", "periodic"],
         help="Periodically refresh one week of events, fetch details, and run user checks",
     )
     periodic_parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
@@ -650,7 +651,7 @@ def main() -> None:
         asyncio.run(evaluate_broadcast_events(args.db, args.code_path, force=args.force))
         return
 
-    if args.command == "periodic-update":
+    if args.command in {"periodic-update", "watch", "periodic"}:
         group_ids = args.ggm_group_ids if args.ggm_group_ids is not None else DEFAULT_GGM_GROUP_IDS
         invalid_group_ids = [gid for gid in group_ids if gid not in TERRESTRIAL_GROUPS]
         if invalid_group_ids:
