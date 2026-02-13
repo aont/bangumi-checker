@@ -465,7 +465,11 @@ async def fetch_event_details(db_path: str, timeout: int, limit: Optional[int] =
         db.row_factory = aiosqlite.Row
 
         async with db.execute(
-            "SELECT COUNT(*) AS c FROM broadcast_events WHERE detail_fetched_at IS NULL"
+            """
+            SELECT COUNT(*) AS c
+            FROM broadcast_events
+            WHERE event_url IS NOT NULL AND detail_fetched_at IS NULL
+            """
         ) as cursor:
             pending_count_row = await cursor.fetchone()
         pending_count = pending_count_row["c"] if pending_count_row else 0
@@ -535,8 +539,17 @@ async def periodic_update_and_evaluate(
     run_once: bool,
 ) -> None:
     async def detail_fetch_loop() -> None:
+        LOGGER.info("detail fetch worker started")
         while True:
-            fetched_count = await fetch_event_details(db_path, timeout)
+            try:
+                fetched_count = await fetch_event_details(db_path, timeout)
+            except Exception:
+                LOGGER.exception("detail fetch worker failed; retrying in 1 minute")
+                if run_once:
+                    raise
+                await asyncio.sleep(60)
+                continue
+
             if run_once:
                 return
             if fetched_count == 0:
