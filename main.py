@@ -363,7 +363,7 @@ async def fetch_event_details(db_path: str, limit: int, timeout: int) -> None:
         await db.commit()
 
 
-def load_user_function(code_path: str):
+def load_user_functions(code_path: str):
     importlib.invalidate_caches()
     module_name = f"user_filter_{uuid.uuid4().hex}"
     module_spec = importlib.util.spec_from_file_location(module_name, code_path)
@@ -383,7 +383,12 @@ def load_user_function(code_path: str):
     evaluate_event = getattr(module, "evaluate_event", None)
     if not callable(evaluate_event):
         raise SystemExit("user code must define callable: evaluate_event(metadata) -> bool")
-    return evaluate_event
+
+    handle_matched_event = getattr(module, "handle_matched_event", None)
+    if handle_matched_event is not None and not callable(handle_matched_event):
+        raise SystemExit("handle_matched_event must be callable when defined")
+
+    return evaluate_event, handle_matched_event
 
 
 async def evaluate_broadcast_events(db_path: str, code_path: str) -> None:
@@ -391,7 +396,7 @@ async def evaluate_broadcast_events(db_path: str, code_path: str) -> None:
     if not user_code.exists() or not user_code.is_file():
         raise SystemExit(f"--code-path must point to an existing file: {code_path}")
 
-    evaluate_event = load_user_function(str(user_code.resolve()))
+    evaluate_event, handle_matched_event = load_user_functions(str(user_code.resolve()))
 
     async with aiosqlite.connect(db_path) as db:
         await ensure_db_schema(db)
@@ -401,6 +406,7 @@ async def evaluate_broadcast_events(db_path: str, code_path: str) -> None:
             """
             SELECT *
             FROM broadcast_events
+            WHERE user_function_returned_true = 0
             ORDER BY source_type, COALESCE(ggm_group_id, -1), channel_index, li_start_at
             """
         ) as cursor:
@@ -426,6 +432,9 @@ async def evaluate_broadcast_events(db_path: str, code_path: str) -> None:
 
             if result:
                 matched_count += 1
+                program = {k: row[k] for k in row.keys()}
+                if handle_matched_event is not None:
+                    handle_matched_event(program)
                 print(
                     json.dumps(
                         {
@@ -443,7 +452,7 @@ async def evaluate_broadcast_events(db_path: str, code_path: str) -> None:
                 )
 
         await db.commit()
-        print(f"matched {matched_count} / {len(rows)} events")
+        print(f"matched {matched_count} / {len(rows)} events checked (excluding previously matched events)")
 
 
 def parse_args() -> argparse.Namespace:

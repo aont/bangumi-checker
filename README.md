@@ -38,7 +38,7 @@ Fetch detailed descriptions for stored events:
 python main.py fetch-broadcast-event-details --db broadcast_events.sqlite3 --limit 50
 ```
 
-Evaluate stored events with user-provided code and print only events where `evaluate_event(metadata)` returns `True`:
+Evaluate stored events with user-provided code and print only events where `evaluate_event(metadata)` returns `True`. Only events that have not previously matched (`user_function_returned_true = 0`) are checked:
 
 ```bash
 python main.py evaluate-broadcast-events --db broadcast_events.sqlite3 --code-path ./my_filter.py
@@ -56,3 +56,6 @@ The evaluator loads user code directly from the provided file path with cache in
 - `user_function_returned_true`
 - `user_function_returned_false`
 - `user_function_never_executed`
+
+
+Optionally, `my_filter.py` can define `handle_matched_event(program)` to receive the full program row for each match (for notifications such as Slack integrations).
