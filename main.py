@@ -31,6 +31,8 @@ DEFAULT_GGM_GROUP_IDS = [42]
 LOG_LEVEL_CHOICES = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LOGGER = logging.getLogger(__name__)
 SQLITE_BUSY_TIMEOUT_MS = 30_000
+PRAGMA_RETRY_COUNT = 5
+PRAGMA_RETRY_DELAY_SECONDS = 0.2
 
 
 def configure_logging(log_level: str) -> None:
@@ -46,11 +48,28 @@ async def connect_db(db_path: str):
     db = await aiosqlite.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     try:
         await db.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
-        await db.execute("PRAGMA journal_mode = WAL")
-        await db.execute("PRAGMA synchronous = NORMAL")
+        await execute_pragma_with_retry(db, "PRAGMA journal_mode = WAL")
+        await execute_pragma_with_retry(db, "PRAGMA synchronous = NORMAL")
         yield db
     finally:
         await db.close()
+
+
+async def execute_pragma_with_retry(db: aiosqlite.Connection, sql: str) -> None:
+    for attempt in range(1, PRAGMA_RETRY_COUNT + 1):
+        try:
+            await db.execute(sql)
+            return
+        except aiosqlite.OperationalError as exc:
+            if "database is locked" not in str(exc).lower() or attempt == PRAGMA_RETRY_COUNT:
+                raise
+            LOGGER.warning(
+                "sqlite pragma failed due to lock (attempt %s/%s): %s",
+                attempt,
+                PRAGMA_RETRY_COUNT,
+                sql,
+            )
+            await asyncio.sleep(PRAGMA_RETRY_DELAY_SECONDS * attempt)
 
 
 @dataclass
