@@ -275,69 +275,6 @@ async def collect(date: str, db_path: str, timeout: int) -> None:
         await db.commit()
 
 
-async def print_stored_events(
-    db_path: str,
-    source_type: Optional[str],
-    ggm_group_id: Optional[int],
-    limit: int,
-) -> None:
-    query = """
-        SELECT
-            source_type,
-            broadcast_date,
-            ggm_group_id,
-            channel_index,
-            channel_name,
-            metadata_title,
-            li_start_at,
-            li_end_at,
-            event_url
-        FROM broadcast_events
-    """
-    clauses: list[str] = []
-    values: list[object] = []
-    if source_type is not None:
-        clauses.append("source_type = ?")
-        values.append(source_type)
-    if ggm_group_id is not None:
-        clauses.append("ggm_group_id = ?")
-        values.append(ggm_group_id)
-
-    if clauses:
-        query += " WHERE " + " AND ".join(clauses)
-
-    query += " ORDER BY broadcast_date DESC, source_type, channel_index, li_start_at LIMIT ?"
-    values.append(limit)
-
-    async with aiosqlite.connect(db_path) as db:
-        await ensure_db_schema(db)
-        db.row_factory = aiosqlite.Row
-        async with db.execute(query, values) as cursor:
-            rows = await cursor.fetchall()
-
-    if not rows:
-        print("no rows found")
-        return
-
-    for row in rows:
-        print(
-            json.dumps(
-                {
-                    "source_type": row["source_type"],
-                    "broadcast_date": row["broadcast_date"],
-                    "ggm_group_id": row["ggm_group_id"],
-                    "channel_index": row["channel_index"],
-                    "channel_name": row["channel_name"],
-                    "title": row["metadata_title"],
-                    "start_at": row["li_start_at"],
-                    "end_at": row["li_end_at"],
-                    "event_url": row["event_url"],
-                },
-                ensure_ascii=False,
-            )
-        )
-
-
 def parse_detailed_description(raw_html: str) -> str:
     tree = html.fromstring(raw_html)
     detail = tree.cssselect("#ggb_program_detail > p.letter_body")
@@ -414,15 +351,6 @@ def parse_args() -> argparse.Namespace:
     fetch_parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
     fetch_parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout in seconds")
 
-    show_parser = subparsers.add_parser(
-        "show-stored-events",
-        help="Print stored events from SQLite",
-    )
-    show_parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
-    show_parser.add_argument("--source-type", choices=["terrestrial", "bs", "cs"], help="Filter by source type")
-    show_parser.add_argument("--ggm-group-id", type=int, help="Filter by terrestrial ggm_group_id")
-    show_parser.add_argument("--limit", type=int, default=100, help="Max rows to print")
-
     fetch_detail_parser = subparsers.add_parser(
         "fetch-broadcast-event-details",
         help="Fetch detailed description for stored broadcast events",
@@ -441,12 +369,6 @@ def main() -> None:
         if len(date) != 8 or not date.isdigit():
             raise SystemExit("--date must be YYYYMMDD")
         asyncio.run(collect(date, args.db, args.timeout))
-        return
-
-    if args.command == "show-stored-events":
-        if args.limit <= 0:
-            raise SystemExit("--limit must be greater than 0")
-        asyncio.run(print_stored_events(args.db, args.source_type, args.ggm_group_id, args.limit))
         return
 
     if args.command == "fetch-broadcast-event-details":

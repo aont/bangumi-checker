@@ -1,6 +1,6 @@
 # bangumi-checker
 
-`main.py` provides a CLI to fetch program events from bangumi.org EPG pages and store them in SQLite, and to print stored rows.
+`main.py` provides a CLI to fetch program events from bangumi.org EPG pages, store them in SQLite, and fetch each event's detailed description.
 
 ## Requirements
 
@@ -15,12 +15,6 @@ Fetch and store events (`--date` omitted then today):
 ```bash
 python main.py fetch-broadcast-events --db broadcast_events.sqlite3
 python main.py fetch-broadcast-events --date 20260213 --db broadcast_events.sqlite3
-```
-
-Show stored events (all dates are output):
-
-```bash
-python main.py show-stored-events --db broadcast_events.sqlite3 --limit 20
 ```
 
 The fetch command retrieves:
