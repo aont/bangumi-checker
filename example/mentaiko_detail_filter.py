@@ -1,7 +1,7 @@
 """Sample filter: notify when detailed program text contains "明太子".
 
 Use with:
-    python main.py evaluate-broadcast-events --db broadcast_events.sqlite3 --code-path ./mentaiko_detail_filter.py
+    python main.py evaluate-broadcast-events --db broadcast_events.sqlite3 --code-path ./example/mentaiko_detail_filter.py
 """
 
 from __future__ import annotations

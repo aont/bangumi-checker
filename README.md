@@ -44,28 +44,28 @@ Detailed information is fetched one event at a time with a random 10-20 second i
 Evaluate stored events with user-provided async code and print only events where `await evaluate_event(metadata)` returns `True`. By default, only events flagged as needing evaluation (newly inserted or updated rows) are checked:
 
 ```bash
-python main.py evaluate-broadcast-events --db broadcast_events.sqlite3 --code-path ./my_filter.py
+python main.py evaluate-broadcast-events --db broadcast_events.sqlite3 --code-path ./example/title_marker_filter.py
 ```
 
 To force re-check all stored events regardless of previous `evaluate_event` results, add `--force`:
 
 ```bash
-python main.py evaluate-broadcast-events --db broadcast_events.sqlite3 --code-path ./my_filter.py --force
+python main.py evaluate-broadcast-events --db broadcast_events.sqlite3 --code-path ./example/title_marker_filter.py --force
 ```
 
 Run periodic updates (every 3 hours by default), collecting broadcast event lists from today through one week ahead. For each target day, the user-defined evaluator (including before/after hooks) runs right after that day's list retrieval completes. Event detail retrieval runs in a separate asynchronous worker and progresses independently for all pending programs:
 
 ```bash
-python main.py periodic-update --db broadcast_events.sqlite3 --code-path ./my_filter.py
+python main.py periodic-update --db broadcast_events.sqlite3 --code-path ./example/title_marker_filter.py
 ```
 
 Run a single update/evaluate cycle and exit:
 
 ```bash
-python main.py periodic-update --db broadcast_events.sqlite3 --code-path ./my_filter.py --once
+python main.py periodic-update --db broadcast_events.sqlite3 --code-path ./example/title_marker_filter.py --once
 ```
 
-`my_filter.py` must define:
+`example/title_marker_filter.py` must define:
 
 ```python
 async def evaluate_event(metadata: dict) -> bool:
@@ -73,8 +73,8 @@ async def evaluate_event(metadata: dict) -> bool:
 ```
 
 
-A sample filter file is included as `my_filter.py`.
-A second sample `mentaiko_detail_filter.py` matches programs whose detailed text includes `明太子` and sends Slack notifications in the same way.
+Sample filters are included in the `example/` directory: `example/title_marker_filter.py` and `example/mentaiko_detail_filter.py`.
+The latter matches programs whose detailed text includes `明太子` and sends Slack notifications in the same way.
 
 It matches programs whose title includes `🈟` or `🈡`, accumulates matched message text in `handle_matched_event`, and sends one combined Slack Incoming Webhook notification in `after_evaluate_events` when `SLACK_WEBHOOK_URL` is set.
 
@@ -86,7 +86,7 @@ The evaluator loads user code directly from the provided file path with cache in
 - `needs_user_evaluation`
 
 
-Optionally, `my_filter.py` can define these async hooks:
+Optionally, `example/title_marker_filter.py` can define these async hooks:
 
 - `before_evaluate_events()`: runs once before the first `evaluate_event` call.
 - `handle_matched_event(program)`: receives the full program row for each match (for notifications such as Slack integrations).
