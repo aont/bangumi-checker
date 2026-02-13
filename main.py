@@ -18,6 +18,7 @@ TERRESTRIAL_GROUPS = {
     42: "Tokyo",
     45: "Kanagawa",
 }
+DEFAULT_GGM_GROUP_IDS = [42]
 
 
 @dataclass
@@ -251,10 +252,11 @@ async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[di
     await db.commit()
 
 
-async def collect(date: str, db_path: str, timeout: int) -> None:
+async def collect(date: str, db_path: str, timeout: int, ggm_group_ids: list[int]) -> None:
+    target_group_ids = ggm_group_ids or DEFAULT_GGM_GROUP_IDS
     requests: list[SourceRequest] = [
         SourceRequest("terrestrial", f"{BASE_URL}/epg/td?broad_cast_date={date}&ggm_group_id={gid}", date, gid)
-        for gid in TERRESTRIAL_GROUPS
+        for gid in target_group_ids
     ] + [
         SourceRequest("bs", f"{BASE_URL}/epg/bs?broad_cast_date={date}", date),
         SourceRequest("cs", f"{BASE_URL}/epg/cs?broad_cast_date={date}", date),
@@ -350,6 +352,14 @@ def parse_args() -> argparse.Namespace:
     fetch_parser.add_argument("--date", help="Broadcast date (YYYYMMDD). Defaults to today")
     fetch_parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
     fetch_parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout in seconds")
+    fetch_parser.add_argument(
+        "--ggm-group-id",
+        dest="ggm_group_ids",
+        type=int,
+        action="append",
+        default=None,
+        help="Terrestrial ggm_group_id (repeatable). Defaults to Tokyo only (42)",
+    )
 
     fetch_detail_parser = subparsers.add_parser(
         "fetch-broadcast-event-details",
@@ -368,7 +378,13 @@ def main() -> None:
         date = args.date or datetime.date.today().strftime("%Y%m%d")
         if len(date) != 8 or not date.isdigit():
             raise SystemExit("--date must be YYYYMMDD")
-        asyncio.run(collect(date, args.db, args.timeout))
+        group_ids = args.ggm_group_ids if args.ggm_group_ids is not None else DEFAULT_GGM_GROUP_IDS
+        invalid_group_ids = [gid for gid in group_ids if gid not in TERRESTRIAL_GROUPS]
+        if invalid_group_ids:
+            supported = ", ".join(str(gid) for gid in TERRESTRIAL_GROUPS)
+            invalid = ", ".join(str(gid) for gid in invalid_group_ids)
+            raise SystemExit(f"unsupported --ggm-group-id: {invalid} (supported: {supported})")
+        asyncio.run(collect(date, args.db, args.timeout, group_ids))
         return
 
     if args.command == "fetch-broadcast-event-details":
