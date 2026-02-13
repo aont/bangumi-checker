@@ -83,7 +83,6 @@ The evaluator loads user code directly from the provided file path with cache in
 - `user_function_returned_true`
 - `user_function_returned_false`
 - `user_function_never_executed`
-- `needs_user_evaluation`
 
 
 Optionally, `example/title_marker_filter.py` can define these async hooks:

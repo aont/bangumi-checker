@@ -271,7 +271,6 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
             user_function_returned_true INTEGER NOT NULL DEFAULT 0,
             user_function_returned_false INTEGER NOT NULL DEFAULT 0,
             user_function_never_executed INTEGER NOT NULL DEFAULT 1,
-            needs_user_evaluation INTEGER NOT NULL DEFAULT 1,
             detailed_description TEXT NOT NULL DEFAULT '',
             detail_fetched_at TEXT,
             inserted_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -302,10 +301,6 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
         await db.execute(
             "ALTER TABLE broadcast_events ADD COLUMN user_function_never_executed INTEGER NOT NULL DEFAULT 1"
         )
-    if "needs_user_evaluation" not in existing_columns:
-        await db.execute(
-            "ALTER TABLE broadcast_events ADD COLUMN needs_user_evaluation INTEGER NOT NULL DEFAULT 1"
-        )
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_broadcast_events_lookup ON broadcast_events(source_type, broadcast_date, ggm_group_id)"
     )
@@ -313,7 +308,7 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_broadcast_events_detail_fetch ON broadcast_events(detail_fetched_at, li_start_at)"
     )
     await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_broadcast_events_eval_queue ON broadcast_events(needs_user_evaluation, broadcast_date)"
+        "CREATE INDEX IF NOT EXISTS idx_broadcast_events_eval_queue ON broadcast_events(user_function_returned_true, broadcast_date)"
     )
     await db.execute(
         """
@@ -422,8 +417,7 @@ async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[di
                     metadata_title, contents_id,
                     metadata_program_id, program_date,
                     href, metadata_detail,
-                    detailed_description,
-                    needs_user_evaluation
+                    detailed_description
                 ) VALUES (
                     :source_type, :broadcast_date, :ggm_group_id,
                     :channel_index, :channel_name,
@@ -436,8 +430,7 @@ async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[di
                     :metadata_title, :contents_id,
                     :metadata_program_id, :program_date,
                     :href, :metadata_detail,
-                    '',
-                    1
+                    ''
                 )
                 """,
                 row,
@@ -472,8 +465,7 @@ async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[di
                     detailed_description = '',
                     user_function_returned_true = 0,
                     user_function_returned_false = 0,
-                    user_function_never_executed = 1,
-                    needs_user_evaluation = 1
+                    user_function_never_executed = 1
                 WHERE id = :id
                 """,
                 {**row, "id": existing_row["id"]},
@@ -617,8 +609,7 @@ async def fetch_event_details(
                 """
                 UPDATE broadcast_events
                 SET detailed_description = ?,
-                    detail_fetched_at = datetime('now'),
-                    needs_user_evaluation = 1
+                    detail_fetched_at = datetime('now')
                 WHERE id = ?
                 """,
                 (detailed_description, row["id"]),
@@ -782,7 +773,7 @@ async def evaluate_broadcast_events(
     where_conditions: list[str] = []
     params: list[object] = []
     if not force:
-        where_conditions.append("needs_user_evaluation = 1")
+        where_conditions.append("user_function_returned_true = 0")
     where_conditions.append(ACTIVE_BROADCAST_CONDITION)
     if broadcast_dates:
         placeholders = ",".join("?" for _ in broadcast_dates)
@@ -819,8 +810,7 @@ async def evaluate_broadcast_events(
             UPDATE broadcast_events
             SET user_function_returned_true = ?,
                 user_function_returned_false = ?,
-                user_function_never_executed = 0,
-                needs_user_evaluation = 0
+                user_function_never_executed = 0
             WHERE id = ?
             """,
             (1 if result else 0, 0 if result else 1, row["id"]),
