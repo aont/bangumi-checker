@@ -73,6 +73,8 @@ async def evaluate_event(metadata: dict) -> bool:
 
 
 A sample filter file is included as `my_filter.py`.
+A second sample `mentaiko_detail_filter.py` matches programs whose detailed text includes `明太子` and sends Slack notifications in the same way.
+
 It matches programs whose title includes `🈟` or `🈡`, accumulates matched message text in `handle_matched_event`, and sends one combined Slack Incoming Webhook notification in `after_evaluate_events` when `SLACK_WEBHOOK_URL` is set.
 
 The evaluator loads user code directly from the provided file path with cache invalidation and updates per-event execution state columns in SQLite:
