@@ -109,10 +109,10 @@ def parse_event_rows(req: SourceRequest, raw_html: str) -> list[dict]:
                     "channel_name": channel_name,
                     "event_id": event_id,
                     "event_url": abs_url,
-                    "program_id": li.get("pid"),
-                    "service_event_id": li.get("se-id"),
-                    "start_at": li.get("s"),
-                    "end_at": li.get("e"),
+                    "li_program_id": li.get("pid"),
+                    "li_service_event_id": li.get("se-id"),
+                    "li_start_at": li.get("s"),
+                    "li_end_at": li.get("e"),
                     "slot_minute": time_text,
                     "title": " ".join(title_node[0].itertext()).strip() if title_node else None,
                     "detail": " ".join(detail_node[0].itertext()).strip() if detail_node else None,
@@ -120,17 +120,22 @@ def parse_event_rows(req: SourceRequest, raw_html: str) -> list[dict]:
                     "genre_class": genre_class,
                     "style_top_px": top_px,
                     "style_height_px": height_px,
-                    "tracking_json": json.dumps(data_json, ensure_ascii=False) if data_json else None,
-                    "raw_data_content": data_content,
+                    "metadata_title": data_json.get("title") if data_json else None,
+                    "metadata_contents_id": data_json.get("contentsId") if data_json else None,
+                    "metadata_program_id": data_json.get("programId") if data_json else None,
+                    "metadata_program_date": data_json.get("programDate") if data_json else None,
+                    "metadata_href": href,
+                    "metadata_detail": " ".join(detail_node[0].itertext()).strip() if detail_node else None,
                 }
             )
     return rows
 
 
 async def init_db(db: aiosqlite.Connection) -> None:
+    await db.execute("DROP TABLE IF EXISTS broadcast_events")
     await db.execute(
         """
-        CREATE TABLE IF NOT EXISTS broadcast_events (
+        CREATE TABLE broadcast_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_type TEXT NOT NULL,
             broadcast_date TEXT NOT NULL,
@@ -139,10 +144,10 @@ async def init_db(db: aiosqlite.Connection) -> None:
             channel_name TEXT,
             event_id TEXT,
             event_url TEXT,
-            program_id TEXT,
-            service_event_id TEXT,
-            start_at TEXT,
-            end_at TEXT,
+            li_program_id TEXT,
+            li_service_event_id TEXT,
+            li_start_at TEXT,
+            li_end_at TEXT,
             slot_minute TEXT,
             title TEXT,
             detail TEXT,
@@ -150,8 +155,12 @@ async def init_db(db: aiosqlite.Connection) -> None:
             genre_class TEXT,
             style_top_px INTEGER,
             style_height_px INTEGER,
-            tracking_json TEXT,
-            raw_data_content TEXT,
+            metadata_title TEXT,
+            metadata_contents_id INTEGER,
+            metadata_program_id TEXT,
+            metadata_program_date TEXT,
+            metadata_href TEXT,
+            metadata_detail TEXT,
             inserted_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
         """
@@ -175,22 +184,26 @@ async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[di
                 source_type, broadcast_date, ggm_group_id,
                 channel_index, channel_name,
                 event_id, event_url,
-                program_id, service_event_id,
-                start_at, end_at,
+                li_program_id, li_service_event_id,
+                li_start_at, li_end_at,
                 slot_minute, title, detail,
                 schedule_class, genre_class,
                 style_top_px, style_height_px,
-                tracking_json, raw_data_content
+                metadata_title, metadata_contents_id,
+                metadata_program_id, metadata_program_date,
+                metadata_href, metadata_detail
             ) VALUES (
                 :source_type, :broadcast_date, :ggm_group_id,
                 :channel_index, :channel_name,
                 :event_id, :event_url,
-                :program_id, :service_event_id,
-                :start_at, :end_at,
+                :li_program_id, :li_service_event_id,
+                :li_start_at, :li_end_at,
                 :slot_minute, :title, :detail,
                 :schedule_class, :genre_class,
                 :style_top_px, :style_height_px,
-                :tracking_json, :raw_data_content
+                :metadata_title, :metadata_contents_id,
+                :metadata_program_id, :metadata_program_date,
+                :metadata_href, :metadata_detail
             )
             """,
             rows,
@@ -233,9 +246,9 @@ async def print_stored_events(
             ggm_group_id,
             channel_index,
             channel_name,
-            title,
-            start_at,
-            end_at,
+            metadata_title,
+            li_start_at,
+            li_end_at,
             event_url
         FROM broadcast_events
     """
@@ -251,7 +264,7 @@ async def print_stored_events(
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
 
-    query += " ORDER BY broadcast_date DESC, source_type, channel_index, start_at LIMIT ?"
+    query += " ORDER BY broadcast_date DESC, source_type, channel_index, li_start_at LIMIT ?"
     values.append(limit)
 
     async with aiosqlite.connect(db_path) as db:
@@ -273,9 +286,9 @@ async def print_stored_events(
                     "ggm_group_id": row["ggm_group_id"],
                     "channel_index": row["channel_index"],
                     "channel_name": row["channel_name"],
-                    "title": row["title"],
-                    "start_at": row["start_at"],
-                    "end_at": row["end_at"],
+                    "title": row["metadata_title"],
+                    "start_at": row["li_start_at"],
+                    "end_at": row["li_end_at"],
                     "event_url": row["event_url"],
                 },
                 ensure_ascii=False,
