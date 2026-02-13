@@ -430,11 +430,16 @@ async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[di
     await db.commit()
 
 
-async def collect(date: str, db_path: str, timeout: int, ggm_group_ids: list[int]) -> None:
-    await collect_for_dates([date], db_path, timeout, ggm_group_ids)
+async def collect(date: str, db: aiosqlite.Connection, timeout: int, ggm_group_ids: list[int]) -> None:
+    await collect_for_dates([date], db, timeout, ggm_group_ids)
 
 
-async def collect_for_dates(dates: list[str], db_path: str, timeout: int, ggm_group_ids: list[int]) -> None:
+async def collect_for_dates(
+    dates: list[str],
+    db: aiosqlite.Connection,
+    timeout: int,
+    ggm_group_ids: list[int],
+) -> None:
     target_group_ids = ggm_group_ids or DEFAULT_GGM_GROUP_IDS
     requests: list[SourceRequest] = []
     for date in dates:
@@ -452,10 +457,10 @@ async def collect_for_dates(dates: list[str], db_path: str, timeout: int, ggm_gr
         )
 
     timeout_conf = aiohttp.ClientTimeout(total=timeout)
-    async with aiohttp.ClientSession(timeout=timeout_conf) as session, connect_db(db_path) as db:
-        await ensure_db_schema(db)
-        db.row_factory = aiosqlite.Row
+    await ensure_db_schema(db)
+    db.row_factory = aiosqlite.Row
 
+    async with aiohttp.ClientSession(timeout=timeout_conf) as session:
         for index, req in enumerate(requests):
             if index > 0:
                 await sleep_request_interval()
@@ -466,8 +471,8 @@ async def collect_for_dates(dates: list[str], db_path: str, timeout: int, ggm_gr
             area = f" group={req.ggm_group_id}" if req.ggm_group_id is not None else ""
             LOGGER.info("stored %4d rows for %s%s", len(rows), req.source_type, area)
 
-        await set_last_broadcast_events_fetched_at(db)
-        await db.commit()
+    await set_last_broadcast_events_fetched_at(db)
+    await db.commit()
 
 
 def parse_detailed_description(raw_html: str) -> str:
@@ -478,70 +483,69 @@ def parse_detailed_description(raw_html: str) -> str:
     return " ".join(detail[0].itertext()).strip()
 
 
-async def fetch_event_details(db_path: str, timeout: int, limit: Optional[int] = None) -> int:
-    async with connect_db(db_path) as db:
-        await ensure_db_schema(db)
-        db.row_factory = aiosqlite.Row
+async def fetch_event_details(db: aiosqlite.Connection, timeout: int, limit: Optional[int] = None) -> int:
+    await ensure_db_schema(db)
+    db.row_factory = aiosqlite.Row
 
-        async with db.execute(
+    async with db.execute(
             """
             SELECT COUNT(*) AS c
             FROM broadcast_events
             WHERE event_url IS NOT NULL AND detail_fetched_at IS NULL
             """
-        ) as cursor:
-            pending_count_row = await cursor.fetchone()
-        pending_count = pending_count_row["c"] if pending_count_row else 0
-        if pending_count == 0:
-            LOGGER.info("all items already have detailed information retrieved")
-            return 0
+    ) as cursor:
+        pending_count_row = await cursor.fetchone()
+    pending_count = pending_count_row["c"] if pending_count_row else 0
+    if pending_count == 0:
+        LOGGER.info("all items already have detailed information retrieved")
+        return 0
 
-        detail_select_sql = """
-            SELECT id, event_url
-            FROM broadcast_events
-            WHERE event_url IS NOT NULL AND detail_fetched_at IS NULL
-            ORDER BY COALESCE(detail_fetched_at, '1970-01-01 00:00:00') ASC, li_start_at ASC
-        """
-        if limit is not None:
-            detail_select_sql += " LIMIT ?"
-            async with db.execute(detail_select_sql, (limit,)) as cursor:
-                targets = await cursor.fetchall()
-        else:
-            async with db.execute(detail_select_sql) as cursor:
-                targets = await cursor.fetchall()
+    detail_select_sql = """
+        SELECT id, event_url
+        FROM broadcast_events
+        WHERE event_url IS NOT NULL AND detail_fetched_at IS NULL
+        ORDER BY COALESCE(detail_fetched_at, '1970-01-01 00:00:00') ASC, li_start_at ASC
+    """
+    if limit is not None:
+        detail_select_sql += " LIMIT ?"
+        async with db.execute(detail_select_sql, (limit,)) as cursor:
+            targets = await cursor.fetchall()
+    else:
+        async with db.execute(detail_select_sql) as cursor:
+            targets = await cursor.fetchall()
 
-        if not targets:
-            LOGGER.info("no rows found")
-            return 0
+    if not targets:
+        LOGGER.info("no rows found")
+        return 0
 
-        timeout_conf = aiohttp.ClientTimeout(total=timeout)
-        fetched_count = 0
-        async with aiohttp.ClientSession(timeout=timeout_conf) as session:
-            for index, row in enumerate(targets):
-                if index > 0:
-                    await sleep_detail_request_interval()
+    timeout_conf = aiohttp.ClientTimeout(total=timeout)
+    fetched_count = 0
+    async with aiohttp.ClientSession(timeout=timeout_conf) as session:
+        for index, row in enumerate(targets):
+            if index > 0:
+                await sleep_detail_request_interval()
 
-                async with session.get(row["event_url"]) as response:
-                    response.raise_for_status()
-                    raw_html = await response.text()
+            async with session.get(row["event_url"]) as response:
+                response.raise_for_status()
+                raw_html = await response.text()
 
-                detailed_description = parse_detailed_description(raw_html)
-                await db.execute(
-                    """
-                    UPDATE broadcast_events
-                    SET detailed_description = ?, detail_fetched_at = datetime('now')
-                    WHERE id = ?
-                    """,
-                    (detailed_description, row["id"]),
-                )
-                await db.commit()
-                LOGGER.info("fetched detailed description for id=%s", row["id"])
-                fetched_count += 1
-
-        if fetched_count > 0:
-            await set_last_event_detail_fetched_at(db)
+            detailed_description = parse_detailed_description(raw_html)
+            await db.execute(
+                """
+                UPDATE broadcast_events
+                SET detailed_description = ?, detail_fetched_at = datetime('now')
+                WHERE id = ?
+                """,
+                (detailed_description, row["id"]),
+            )
             await db.commit()
-        return fetched_count
+            LOGGER.info("fetched detailed description for id=%s", row["id"])
+            fetched_count += 1
+
+    if fetched_count > 0:
+        await set_last_event_detail_fetched_at(db)
+        await db.commit()
+    return fetched_count
 
 
 def upcoming_dates(days_ahead: int = 7) -> list[str]:
@@ -550,7 +554,7 @@ def upcoming_dates(days_ahead: int = 7) -> list[str]:
 
 
 async def periodic_update_and_evaluate(
-    db_path: str,
+    db: aiosqlite.Connection,
     timeout: int,
     ggm_group_ids: list[int],
     code_path: str,
@@ -561,7 +565,7 @@ async def periodic_update_and_evaluate(
         LOGGER.info("detail fetch worker started")
         while True:
             try:
-                fetched_count = await fetch_event_details(db_path, timeout)
+                fetched_count = await fetch_event_details(db, timeout)
             except Exception:
                 LOGGER.exception("detail fetch worker failed; retrying in 1 minute")
                 if run_once:
@@ -581,8 +585,8 @@ async def periodic_update_and_evaluate(
             dates = upcoming_dates(7)
             LOGGER.info("starting update cycle for dates %s to %s", dates[0], dates[-1])
             for date in dates:
-                await collect_for_dates([date], db_path, timeout, ggm_group_ids)
-                await evaluate_broadcast_events(db_path, code_path, broadcast_dates=[date])
+                await collect_for_dates([date], db, timeout, ggm_group_ids)
+                await evaluate_broadcast_events(db, code_path, broadcast_dates=[date])
             if run_once:
                 await detail_worker
                 return
@@ -640,7 +644,7 @@ def load_user_functions(code_path: str):
 
 
 async def evaluate_broadcast_events(
-    db_path: str,
+    db: aiosqlite.Connection,
     code_path: str,
     force: bool = False,
     broadcast_dates: Optional[list[str]] = None,
@@ -653,79 +657,78 @@ async def evaluate_broadcast_events(
         str(user_code.resolve())
     )
 
-    async with connect_db(db_path) as db:
-        await ensure_db_schema(db)
-        db.row_factory = aiosqlite.Row
+    await ensure_db_schema(db)
+    db.row_factory = aiosqlite.Row
 
-        where_conditions: list[str] = []
-        params: list[object] = []
-        if not force:
-            where_conditions.append("needs_user_evaluation = 1")
-        if broadcast_dates:
-            placeholders = ",".join("?" for _ in broadcast_dates)
-            where_conditions.append(f"broadcast_date IN ({placeholders})")
-            params.extend(broadcast_dates)
-        where_clause = f"WHERE {' AND '.join(where_conditions)}" if where_conditions else ""
-        async with db.execute(
-            f"""
-            SELECT *
-            FROM broadcast_events
-            {where_clause}
-            ORDER BY source_type, COALESCE(ggm_group_id, -1), channel_index, li_start_at
+    where_conditions: list[str] = []
+    params: list[object] = []
+    if not force:
+        where_conditions.append("needs_user_evaluation = 1")
+    if broadcast_dates:
+        placeholders = ",".join("?" for _ in broadcast_dates)
+        where_conditions.append(f"broadcast_date IN ({placeholders})")
+        params.extend(broadcast_dates)
+    where_clause = f"WHERE {' AND '.join(where_conditions)}" if where_conditions else ""
+    async with db.execute(
+        f"""
+        SELECT *
+        FROM broadcast_events
+        {where_clause}
+        ORDER BY source_type, COALESCE(ggm_group_id, -1), channel_index, li_start_at
+        """,
+        params,
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    matched_count = 0
+    if before_evaluate_events is not None:
+        await before_evaluate_events()
+
+    for row in rows:
+        metadata = {k: row[k] for k in row.keys() if k.startswith("metadata_")}
+        result = await evaluate_event(metadata)
+        if not isinstance(result, bool):
+            raise SystemExit(f"evaluate_event must return bool (event id={row['id']})")
+
+        await db.execute(
+            """
+            UPDATE broadcast_events
+            SET user_function_returned_true = ?,
+                user_function_returned_false = ?,
+                user_function_never_executed = 0,
+                needs_user_evaluation = 0
+            WHERE id = ?
             """,
-            params,
-        ) as cursor:
-            rows = await cursor.fetchall()
+            (1 if result else 0, 0 if result else 1, row["id"]),
+        )
 
-        matched_count = 0
-        if before_evaluate_events is not None:
-            await before_evaluate_events()
-
-        for row in rows:
-            metadata = {k: row[k] for k in row.keys() if k.startswith("metadata_")}
-            result = await evaluate_event(metadata)
-            if not isinstance(result, bool):
-                raise SystemExit(f"evaluate_event must return bool (event id={row['id']})")
-
-            await db.execute(
-                """
-                UPDATE broadcast_events
-                SET user_function_returned_true = ?,
-                    user_function_returned_false = ?,
-                    user_function_never_executed = 0,
-                    needs_user_evaluation = 0
-                WHERE id = ?
-                """,
-                (1 if result else 0, 0 if result else 1, row["id"]),
+        if result:
+            matched_count += 1
+            program = {k: row[k] for k in row.keys()}
+            if handle_matched_event is not None:
+                await handle_matched_event(program)
+            LOGGER.info(
+                json.dumps(
+                    {
+                        "id": row["id"],
+                        "source_type": row["source_type"],
+                        "broadcast_date": row["broadcast_date"],
+                        "channel_name": row["channel_name"],
+                        "slot_minute": row["slot_minute"],
+                        "title": row["title"],
+                        "event_url": row["event_url"],
+                        "metadata": metadata,
+                    },
+                    ensure_ascii=False,
+                )
             )
 
-            if result:
-                matched_count += 1
-                program = {k: row[k] for k in row.keys()}
-                if handle_matched_event is not None:
-                    await handle_matched_event(program)
-                LOGGER.info(
-                    json.dumps(
-                        {
-                            "id": row["id"],
-                            "source_type": row["source_type"],
-                            "broadcast_date": row["broadcast_date"],
-                            "channel_name": row["channel_name"],
-                            "slot_minute": row["slot_minute"],
-                            "title": row["title"],
-                            "event_url": row["event_url"],
-                            "metadata": metadata,
-                        },
-                        ensure_ascii=False,
-                    )
-                )
+    if after_evaluate_events is not None:
+        await after_evaluate_events()
 
-        if after_evaluate_events is not None:
-            await after_evaluate_events()
-
-        await db.commit()
-        summary_suffix = "(forced re-check enabled)" if force else "(excluding previously matched events)"
-        LOGGER.info("matched %s / %s events checked %s", matched_count, len(rows), summary_suffix)
+    await db.commit()
+    summary_suffix = "(forced re-check enabled)" if force else "(excluding previously matched events)"
+    LOGGER.info("matched %s / %s events checked %s", matched_count, len(rows), summary_suffix)
 
 
 def parse_args() -> argparse.Namespace:
@@ -829,7 +832,11 @@ def main() -> None:
             supported = ", ".join(str(gid) for gid in TERRESTRIAL_GROUPS)
             invalid = ", ".join(str(gid) for gid in invalid_group_ids)
             raise SystemExit(f"unsupported --ggm-group-id: {invalid} (supported: {supported})")
-        asyncio.run(collect(date, args.db, args.timeout, group_ids))
+        async def run_fetch() -> None:
+            async with connect_db(args.db) as db:
+                await collect(date, db, args.timeout, group_ids)
+
+        asyncio.run(run_fetch())
         return
 
     if args.command in {
@@ -839,11 +846,19 @@ def main() -> None:
     }:
         if args.limit <= 0:
             raise SystemExit("--limit must be greater than 0")
-        asyncio.run(fetch_event_details(args.db, args.timeout, args.limit))
+        async def run_detail_fetch() -> None:
+            async with connect_db(args.db) as db:
+                await fetch_event_details(db, args.timeout, args.limit)
+
+        asyncio.run(run_detail_fetch())
         return
 
     if args.command in {"evaluate-broadcast-events", "eval"}:
-        asyncio.run(evaluate_broadcast_events(args.db, args.code_path, force=args.force))
+        async def run_evaluate() -> None:
+            async with connect_db(args.db) as db:
+                await evaluate_broadcast_events(db, args.code_path, force=args.force)
+
+        asyncio.run(run_evaluate())
         return
 
     if args.command in {"periodic-update", "watch", "periodic"}:
@@ -855,16 +870,18 @@ def main() -> None:
             raise SystemExit(f"unsupported --ggm-group-id: {invalid} (supported: {supported})")
         if args.interval_hours <= 0:
             raise SystemExit("--interval-hours must be greater than 0")
-        asyncio.run(
-            periodic_update_and_evaluate(
-                db_path=args.db,
-                timeout=args.timeout,
-                ggm_group_ids=group_ids,
-                code_path=args.code_path,
-                interval_hours=args.interval_hours,
-                run_once=args.once,
-            )
-        )
+        async def run_periodic() -> None:
+            async with connect_db(args.db) as db:
+                await periodic_update_and_evaluate(
+                    db=db,
+                    timeout=args.timeout,
+                    ggm_group_ids=group_ids,
+                    code_path=args.code_path,
+                    interval_hours=args.interval_hours,
+                    run_once=args.once,
+                )
+
+        asyncio.run(run_periodic())
         return
 
     raise SystemExit(f"unknown command: {args.command}")
