@@ -178,6 +178,34 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_broadcast_events_detail_fetch ON broadcast_events(detail_fetched_at, li_start_at)"
     )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fetch_status (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            last_broadcast_events_fetched_at TEXT,
+            last_event_detail_fetched_at TEXT
+        )
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO fetch_status (id, last_broadcast_events_fetched_at, last_event_detail_fetched_at)
+        VALUES (1, NULL, NULL)
+        ON CONFLICT(id) DO NOTHING
+        """
+    )
+
+
+async def set_last_broadcast_events_fetched_at(db: aiosqlite.Connection) -> None:
+    await db.execute(
+        "UPDATE fetch_status SET last_broadcast_events_fetched_at = datetime('now') WHERE id = 1"
+    )
+
+
+async def set_last_event_detail_fetched_at(db: aiosqlite.Connection) -> None:
+    await db.execute(
+        "UPDATE fetch_status SET last_event_detail_fetched_at = datetime('now') WHERE id = 1"
+    )
 
 
 async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[dict]) -> None:
@@ -242,6 +270,9 @@ async def collect(date: str, db_path: str, timeout: int) -> None:
             await store_rows(db, req, rows)
             area = f" group={req.ggm_group_id}" if req.ggm_group_id is not None else ""
             print(f"stored {len(rows):4d} rows for {req.source_type}{area}")
+
+        await set_last_broadcast_events_fetched_at(db)
+        await db.commit()
 
 
 async def print_stored_events(
@@ -346,6 +377,7 @@ async def fetch_event_details(db_path: str, limit: int, timeout: int) -> None:
             return
 
         timeout_conf = aiohttp.ClientTimeout(total=timeout)
+        fetched_count = 0
         async with aiohttp.ClientSession(timeout=timeout_conf) as session:
             for row in targets:
                 async with session.get(row["event_url"]) as response:
@@ -362,6 +394,10 @@ async def fetch_event_details(db_path: str, limit: int, timeout: int) -> None:
                     (detailed_description, row["id"]),
                 )
                 print(f"fetched detailed description for id={row['id']}")
+                fetched_count += 1
+
+        if fetched_count > 0:
+            await set_last_event_detail_fetched_at(db)
 
         await db.commit()
 
