@@ -37,7 +37,7 @@ DETAIL_FETCH_IDLE_SLEEP_SECONDS = 60
 ACTIVE_BROADCAST_CONDITION = """
 (
     li_end_at IS NULL
-    OR li_end_at > unixepoch('now', 'localtime')
+    OR li_end_at > CAST(strftime('%s', 'now', 'localtime') AS INTEGER)
 )
 """
 
@@ -272,7 +272,7 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
             user_function_never_executed INTEGER NOT NULL DEFAULT 1,
             detailed_description TEXT NOT NULL DEFAULT '',
             detail_fetched_at INTEGER,
-            inserted_at INTEGER NOT NULL DEFAULT (unixepoch('now'))
+            inserted_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER))
         )
         """
     )
@@ -329,13 +329,13 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
 
 async def set_last_broadcast_events_fetched_at(db: aiosqlite.Connection) -> None:
     await db.execute(
-        "UPDATE fetch_status SET last_broadcast_events_fetched_at = unixepoch('now') WHERE id = 1"
+        "UPDATE fetch_status SET last_broadcast_events_fetched_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE id = 1"
     )
 
 
 async def set_last_event_detail_fetched_at(db: aiosqlite.Connection) -> None:
     await db.execute(
-        "UPDATE fetch_status SET last_event_detail_fetched_at = unixepoch('now') WHERE id = 1"
+        "UPDATE fetch_status SET last_event_detail_fetched_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE id = 1"
     )
 
 
@@ -550,7 +550,7 @@ async def fetch_event_details(
         WHERE event_url IS NOT NULL
           AND detail_fetched_at IS NULL
           AND li_end_at IS NOT NULL
-          AND li_end_at <= unixepoch('now', 'localtime')
+          AND li_end_at <= CAST(strftime('%s', 'now', 'localtime') AS INTEGER)
         """
     )
     await db.commit()
@@ -608,7 +608,7 @@ async def fetch_event_details(
                 """
                 UPDATE broadcast_events
                 SET detailed_description = ?,
-                    detail_fetched_at = unixepoch('now')
+                    detail_fetched_at = CAST(strftime('%s', 'now') AS INTEGER)
                 WHERE id = ?
                 """,
                 (detailed_description, row["id"]),
