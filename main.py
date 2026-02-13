@@ -133,9 +133,14 @@ def parse_event_rows(req: SourceRequest, raw_html: str) -> list[dict]:
 
 async def init_db(db: aiosqlite.Connection) -> None:
     await db.execute("DROP TABLE IF EXISTS broadcast_events")
+    await ensure_db_schema(db)
+    await db.commit()
+
+
+async def ensure_db_schema(db: aiosqlite.Connection) -> None:
     await db.execute(
         """
-        CREATE TABLE broadcast_events (
+        CREATE TABLE IF NOT EXISTS broadcast_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_type TEXT NOT NULL,
             broadcast_date TEXT NOT NULL,
@@ -161,6 +166,8 @@ async def init_db(db: aiosqlite.Connection) -> None:
             metadata_program_date TEXT,
             metadata_href TEXT,
             metadata_detail TEXT,
+            detailed_description TEXT NOT NULL DEFAULT '',
+            detail_fetched_at TEXT,
             inserted_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
         """
@@ -168,7 +175,9 @@ async def init_db(db: aiosqlite.Connection) -> None:
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_broadcast_events_lookup ON broadcast_events(source_type, broadcast_date, ggm_group_id)"
     )
-    await db.commit()
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_broadcast_events_detail_fetch ON broadcast_events(detail_fetched_at, li_start_at)"
+    )
 
 
 async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[dict]) -> None:
@@ -189,9 +198,10 @@ async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[di
                 slot_minute, title, detail,
                 schedule_class, genre_class,
                 style_top_px, style_height_px,
-                metadata_title, metadata_contents_id,
-                metadata_program_id, metadata_program_date,
-                metadata_href, metadata_detail
+                    metadata_title, metadata_contents_id,
+                    metadata_program_id, metadata_program_date,
+                    metadata_href, metadata_detail,
+                    detailed_description
             ) VALUES (
                 :source_type, :broadcast_date, :ggm_group_id,
                 :channel_index, :channel_name,
@@ -201,9 +211,10 @@ async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[di
                 :slot_minute, :title, :detail,
                 :schedule_class, :genre_class,
                 :style_top_px, :style_height_px,
-                :metadata_title, :metadata_contents_id,
-                :metadata_program_id, :metadata_program_date,
-                :metadata_href, :metadata_detail
+                    :metadata_title, :metadata_contents_id,
+                    :metadata_program_id, :metadata_program_date,
+                    :metadata_href, :metadata_detail,
+                    ''
             )
             """,
             rows,
@@ -268,7 +279,7 @@ async def print_stored_events(
     values.append(limit)
 
     async with aiosqlite.connect(db_path) as db:
-        await init_db(db)
+        await ensure_db_schema(db)
         db.row_factory = aiosqlite.Row
         async with db.execute(query, values) as cursor:
             rows = await cursor.fetchall()
@@ -296,6 +307,65 @@ async def print_stored_events(
         )
 
 
+def parse_detailed_description(raw_html: str) -> str:
+    tree = html.fromstring(raw_html)
+    detail = tree.cssselect("#ggb_program_detail > p.letter_body")
+    if not detail:
+        return ""
+    return " ".join(detail[0].itertext()).strip()
+
+
+async def fetch_event_details(db_path: str, limit: int, timeout: int) -> None:
+    async with aiosqlite.connect(db_path) as db:
+        await ensure_db_schema(db)
+        db.row_factory = aiosqlite.Row
+
+        async with db.execute(
+            "SELECT COUNT(*) AS c FROM broadcast_events WHERE detail_fetched_at IS NULL"
+        ) as cursor:
+            pending_count_row = await cursor.fetchone()
+        pending_count = pending_count_row["c"] if pending_count_row else 0
+        if pending_count == 0:
+            print("all items already have detailed information retrieved")
+            return
+
+        async with db.execute(
+            """
+            SELECT id, event_url
+            FROM broadcast_events
+            WHERE event_url IS NOT NULL
+            ORDER BY COALESCE(detail_fetched_at, '1970-01-01 00:00:00') ASC, li_start_at ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cursor:
+            targets = await cursor.fetchall()
+
+        if not targets:
+            print("no rows found")
+            return
+
+        timeout_conf = aiohttp.ClientTimeout(total=timeout)
+        async with aiohttp.ClientSession(timeout=timeout_conf) as session:
+            for row in targets:
+                async with session.get(row["event_url"]) as response:
+                    response.raise_for_status()
+                    raw_html = await response.text()
+
+                detailed_description = parse_detailed_description(raw_html)
+                await db.execute(
+                    """
+                    UPDATE broadcast_events
+                    SET detailed_description = ?, detail_fetched_at = datetime('now')
+                    WHERE id = ?
+                    """,
+                    (detailed_description, row["id"]),
+                )
+                print(f"fetched detailed description for id={row['id']}")
+
+        await db.commit()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Bangumi checker CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -317,6 +387,14 @@ def parse_args() -> argparse.Namespace:
     show_parser.add_argument("--ggm-group-id", type=int, help="Filter by terrestrial ggm_group_id")
     show_parser.add_argument("--limit", type=int, default=100, help="Max rows to print")
 
+    fetch_detail_parser = subparsers.add_parser(
+        "fetch-broadcast-event-details",
+        help="Fetch detailed description for stored broadcast events",
+    )
+    fetch_detail_parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
+    fetch_detail_parser.add_argument("--limit", type=int, default=50, help="Max rows to fetch")
+    fetch_detail_parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout in seconds")
+
     return parser.parse_args()
 
 
@@ -333,6 +411,12 @@ def main() -> None:
         if args.limit <= 0:
             raise SystemExit("--limit must be greater than 0")
         asyncio.run(print_stored_events(args.db, args.source_type, args.ggm_group_id, args.limit))
+        return
+
+    if args.command == "fetch-broadcast-event-details":
+        if args.limit <= 0:
+            raise SystemExit("--limit must be greater than 0")
+        asyncio.run(fetch_event_details(args.db, args.limit, args.timeout))
         return
 
     raise SystemExit(f"unknown command: {args.command}")
