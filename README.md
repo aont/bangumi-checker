@@ -1,6 +1,6 @@
 # bangumi-checker
 
-`main.py` provides a CLI to fetch program events from bangumi.org EPG pages, store them in SQLite, and fetch each event's detailed description.
+`main.py` provides a CLI to fetch program events from bangumi.org EPG pages, store them in SQLite, fetch each event's detailed description, and run periodic update/evaluation cycles.
 
 ## Requirements
 
@@ -38,6 +38,8 @@ Fetch detailed descriptions for stored events:
 python main.py fetch-broadcast-event-details --db broadcast_events.sqlite3 --limit 50
 ```
 
+Detailed information is fetched one event at a time with a random 10-20 second interval between requests.
+
 Evaluate stored events with user-provided async code and print only events where `await evaluate_event(metadata)` returns `True`. By default, only events that have not previously matched (`user_function_returned_true = 0`) are checked:
 
 ```bash
@@ -48,6 +50,18 @@ To force re-check all stored events regardless of previous `evaluate_event` resu
 
 ```bash
 python main.py evaluate-broadcast-events --db broadcast_events.sqlite3 --code-path ./my_filter.py --force
+```
+
+Run periodic updates (every 3 hours by default), collecting broadcast event lists from today through one week ahead, then fetch event details and run the user-defined evaluator:
+
+```bash
+python main.py periodic-update --db broadcast_events.sqlite3 --code-path ./my_filter.py
+```
+
+Run a single update/evaluate cycle and exit:
+
+```bash
+python main.py periodic-update --db broadcast_events.sqlite3 --code-path ./my_filter.py --once
 ```
 
 `my_filter.py` must define:

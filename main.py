@@ -46,6 +46,10 @@ async def sleep_request_interval() -> None:
     await asyncio.sleep(random.uniform(2, 7))
 
 
+async def sleep_detail_request_interval() -> None:
+    await asyncio.sleep(random.uniform(10, 20))
+
+
 def parse_channel_names(tree: html.HtmlElement) -> list[str]:
     channels = [
         " ".join(node.cssselect("p")[0].itertext()).strip()
@@ -281,18 +285,29 @@ async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[di
 
 
 async def collect(date: str, db_path: str, timeout: int, ggm_group_ids: list[int]) -> None:
+    await collect_for_dates([date], db_path, timeout, ggm_group_ids)
+
+
+async def collect_for_dates(dates: list[str], db_path: str, timeout: int, ggm_group_ids: list[int]) -> None:
     target_group_ids = ggm_group_ids or DEFAULT_GGM_GROUP_IDS
-    requests: list[SourceRequest] = [
-        SourceRequest("terrestrial", f"{BASE_URL}/epg/td?broad_cast_date={date}&ggm_group_id={gid}", date, gid)
-        for gid in target_group_ids
-    ] + [
-        SourceRequest("bs", f"{BASE_URL}/epg/bs?broad_cast_date={date}", date),
-        SourceRequest("cs", f"{BASE_URL}/epg/cs?broad_cast_date={date}", date),
-    ]
+    requests: list[SourceRequest] = []
+    for date in dates:
+        requests.extend(
+            [
+                SourceRequest("terrestrial", f"{BASE_URL}/epg/td?broad_cast_date={date}&ggm_group_id={gid}", date, gid)
+                for gid in target_group_ids
+            ]
+        )
+        requests.extend(
+            [
+                SourceRequest("bs", f"{BASE_URL}/epg/bs?broad_cast_date={date}", date),
+                SourceRequest("cs", f"{BASE_URL}/epg/cs?broad_cast_date={date}", date),
+            ]
+        )
 
     timeout_conf = aiohttp.ClientTimeout(total=timeout)
     async with aiohttp.ClientSession(timeout=timeout_conf) as session, aiosqlite.connect(db_path) as db:
-        await init_db(db)
+        await ensure_db_schema(db)
 
         for index, req in enumerate(requests):
             if index > 0:
@@ -334,7 +349,7 @@ async def fetch_event_details(db_path: str, limit: int, timeout: int) -> None:
             """
             SELECT id, event_url
             FROM broadcast_events
-            WHERE event_url IS NOT NULL
+            WHERE event_url IS NOT NULL AND detail_fetched_at IS NULL
             ORDER BY COALESCE(detail_fetched_at, '1970-01-01 00:00:00') ASC, li_start_at ASC
             LIMIT ?
             """,
@@ -351,7 +366,7 @@ async def fetch_event_details(db_path: str, limit: int, timeout: int) -> None:
         async with aiohttp.ClientSession(timeout=timeout_conf) as session:
             for index, row in enumerate(targets):
                 if index > 0:
-                    await sleep_request_interval()
+                    await sleep_detail_request_interval()
 
                 async with session.get(row["event_url"]) as response:
                     response.raise_for_status()
@@ -373,6 +388,32 @@ async def fetch_event_details(db_path: str, limit: int, timeout: int) -> None:
             await set_last_event_detail_fetched_at(db)
 
         await db.commit()
+
+
+def upcoming_dates(days_ahead: int = 7) -> list[str]:
+    today = datetime.date.today()
+    return [(today + datetime.timedelta(days=offset)).strftime("%Y%m%d") for offset in range(days_ahead + 1)]
+
+
+async def periodic_update_and_evaluate(
+    db_path: str,
+    timeout: int,
+    ggm_group_ids: list[int],
+    code_path: str,
+    detail_limit: int,
+    interval_hours: int,
+    run_once: bool,
+) -> None:
+    while True:
+        dates = upcoming_dates(7)
+        print(f"starting update cycle for dates {dates[0]} to {dates[-1]}")
+        await collect_for_dates(dates, db_path, timeout, ggm_group_ids)
+        await fetch_event_details(db_path, detail_limit, timeout)
+        await evaluate_broadcast_events(db_path, code_path)
+        if run_once:
+            return
+        print(f"cycle complete; sleeping for {interval_hours} hours")
+        await asyncio.sleep(interval_hours * 60 * 60)
 
 
 def load_user_functions(code_path: str):
@@ -540,6 +581,43 @@ def parse_args() -> argparse.Namespace:
         help="Re-check all events regardless of previous evaluate_event results",
     )
 
+    periodic_parser = subparsers.add_parser(
+        "periodic-update",
+        help="Periodically refresh one week of events, fetch details, and run user checks",
+    )
+    periodic_parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
+    periodic_parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout in seconds")
+    periodic_parser.add_argument(
+        "--ggm-group-id",
+        dest="ggm_group_ids",
+        type=int,
+        action="append",
+        default=None,
+        help="Terrestrial ggm_group_id (repeatable). Defaults to Tokyo only (42)",
+    )
+    periodic_parser.add_argument(
+        "--code-path",
+        required=True,
+        help="Path to Python file defining async evaluate_event(metadata) -> bool",
+    )
+    periodic_parser.add_argument(
+        "--detail-limit",
+        type=int,
+        default=300,
+        help="Max detail pages to fetch per cycle",
+    )
+    periodic_parser.add_argument(
+        "--interval-hours",
+        type=int,
+        default=3,
+        help="Cycle interval in hours",
+    )
+    periodic_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single update/evaluate cycle and exit",
+    )
+
     return parser.parse_args()
 
 
@@ -570,6 +648,30 @@ def main() -> None:
 
     if args.command in {"evaluate-broadcast-events", "eval"}:
         asyncio.run(evaluate_broadcast_events(args.db, args.code_path, force=args.force))
+        return
+
+    if args.command == "periodic-update":
+        group_ids = args.ggm_group_ids if args.ggm_group_ids is not None else DEFAULT_GGM_GROUP_IDS
+        invalid_group_ids = [gid for gid in group_ids if gid not in TERRESTRIAL_GROUPS]
+        if invalid_group_ids:
+            supported = ", ".join(str(gid) for gid in TERRESTRIAL_GROUPS)
+            invalid = ", ".join(str(gid) for gid in invalid_group_ids)
+            raise SystemExit(f"unsupported --ggm-group-id: {invalid} (supported: {supported})")
+        if args.interval_hours <= 0:
+            raise SystemExit("--interval-hours must be greater than 0")
+        if args.detail_limit <= 0:
+            raise SystemExit("--detail-limit must be greater than 0")
+        asyncio.run(
+            periodic_update_and_evaluate(
+                db_path=args.db,
+                timeout=args.timeout,
+                ggm_group_ids=group_ids,
+                code_path=args.code_path,
+                detail_limit=args.detail_limit,
+                interval_hours=args.interval_hours,
+                run_once=args.once,
+            )
+        )
         return
 
     raise SystemExit(f"unknown command: {args.command}")
