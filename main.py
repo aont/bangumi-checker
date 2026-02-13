@@ -396,7 +396,7 @@ def load_user_functions(code_path: str):
     return evaluate_event, handle_matched_event
 
 
-async def evaluate_broadcast_events(db_path: str, code_path: str) -> None:
+async def evaluate_broadcast_events(db_path: str, code_path: str, force: bool = False) -> None:
     user_code = pathlib.Path(code_path)
     if not user_code.exists() or not user_code.is_file():
         raise SystemExit(f"--code-path must point to an existing file: {code_path}")
@@ -407,11 +407,12 @@ async def evaluate_broadcast_events(db_path: str, code_path: str) -> None:
         await ensure_db_schema(db)
         db.row_factory = aiosqlite.Row
 
+        where_clause = "" if force else "WHERE user_function_returned_true = 0"
         async with db.execute(
-            """
+            f"""
             SELECT *
             FROM broadcast_events
-            WHERE user_function_returned_true = 0
+            {where_clause}
             ORDER BY source_type, COALESCE(ggm_group_id, -1), channel_index, li_start_at
             """
         ) as cursor:
@@ -457,7 +458,8 @@ async def evaluate_broadcast_events(db_path: str, code_path: str) -> None:
                 )
 
         await db.commit()
-        print(f"matched {matched_count} / {len(rows)} events checked (excluding previously matched events)")
+        summary_suffix = "(forced re-check enabled)" if force else "(excluding previously matched events)"
+        print(f"matched {matched_count} / {len(rows)} events checked {summary_suffix}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -498,6 +500,11 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to Python file defining async evaluate_event(metadata) -> bool",
     )
+    evaluate_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-check all events regardless of previous evaluate_event results",
+    )
 
     return parser.parse_args()
 
@@ -524,7 +531,7 @@ def main() -> None:
         return
 
     if args.command == "evaluate-broadcast-events":
-        asyncio.run(evaluate_broadcast_events(args.db, args.code_path))
+        asyncio.run(evaluate_broadcast_events(args.db, args.code_path, force=args.force))
         return
 
     raise SystemExit(f"unknown command: {args.command}")
