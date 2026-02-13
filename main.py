@@ -285,30 +285,6 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
         )
         """
     )
-    async with db.execute("PRAGMA table_info(broadcast_events)") as cursor:
-        existing_columns = {row[1] for row in await cursor.fetchall()}
-    if "metadata_contents_id" in existing_columns and "contents_id" not in existing_columns:
-        await db.execute(
-            "ALTER TABLE broadcast_events RENAME COLUMN metadata_contents_id TO contents_id"
-        )
-    if "metadata_program_date" in existing_columns and "program_date" not in existing_columns:
-        await db.execute(
-            "ALTER TABLE broadcast_events RENAME COLUMN metadata_program_date TO program_date"
-        )
-    if "metadata_href" in existing_columns and "href" not in existing_columns:
-        await db.execute("ALTER TABLE broadcast_events RENAME COLUMN metadata_href TO href")
-    if "user_function_returned_true" not in existing_columns:
-        await db.execute(
-            "ALTER TABLE broadcast_events ADD COLUMN user_function_returned_true INTEGER NOT NULL DEFAULT 0"
-        )
-    if "user_function_returned_false" not in existing_columns:
-        await db.execute(
-            "ALTER TABLE broadcast_events ADD COLUMN user_function_returned_false INTEGER NOT NULL DEFAULT 0"
-        )
-    if "user_function_never_executed" not in existing_columns:
-        await db.execute(
-            "ALTER TABLE broadcast_events ADD COLUMN user_function_never_executed INTEGER NOT NULL DEFAULT 1"
-        )
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_broadcast_events_lookup ON broadcast_events(source_type, broadcast_date, ggm_group_id)"
     )
