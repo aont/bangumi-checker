@@ -484,6 +484,15 @@ def parse_detailed_description(raw_html: str) -> str:
     return " ".join(detail[0].itertext()).strip()
 
 
+def extract_event_token(event_url: Optional[str]) -> Optional[str]:
+    if not event_url:
+        return None
+    path = urlparse(event_url).path.rstrip("/")
+    if not path or "/" not in path:
+        return None
+    return path.rsplit("/", 1)[-1] or None
+
+
 async def fetch_event_details(db: aiosqlite.Connection, timeout: int, limit: Optional[int] = None) -> int:
     await ensure_db_schema(db)
     db.row_factory = aiosqlite.Row
@@ -502,7 +511,7 @@ async def fetch_event_details(db: aiosqlite.Connection, timeout: int, limit: Opt
         return 0
 
     detail_select_sql = """
-        SELECT id, event_url
+        SELECT id, event_url, event_id
         FROM broadcast_events
         WHERE event_url IS NOT NULL AND detail_fetched_at IS NULL
         ORDER BY COALESCE(detail_fetched_at, '1970-01-01 00:00:00') ASC, li_start_at ASC
@@ -540,7 +549,12 @@ async def fetch_event_details(db: aiosqlite.Connection, timeout: int, limit: Opt
                 (detailed_description, row["id"]),
             )
             await db.commit()
-            LOGGER.info("fetched detailed description for id=%s", row["id"])
+            event_token = row["event_id"] or extract_event_token(row["event_url"])
+            LOGGER.info(
+                "fetched detailed description for id=%s event_token=%s",
+                row["id"],
+                event_token or "",
+            )
             fetched_count += 1
 
     if fetched_count > 0:
