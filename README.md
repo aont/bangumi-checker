@@ -99,10 +99,10 @@ All logs include timestamps, and the global log level can be controlled via `--l
 
 ### `evaluate_event(metadata: dict) -> bool`
 
-- **Input**: `metadata` is a dictionary that includes metadata fields from the `broadcast_events` row: `metadata_*` keys plus `contents_id`, `program_date`, and `href`.
+- **Input**: `metadata` is a dictionary that includes all columns from the `broadcast_events` row (`SELECT *` 相当)。
 - **Output**: must return `True` or `False`.
 
-`metadata` keys:
+`metadata` includes every `broadcast_events` column. Frequently used keys include:
 
 | Key | Type | Description |
 | --- | --- | --- |
@@ -112,6 +112,9 @@ All logs include timestamps, and the global log level can be controlled via `--l
 | `program_date` | `str \| None` | Program date parsed from `data-content.programDate`. |
 | `href` | `str \| None` | Relative link from `a.title_link[href]` (example: `/tv_events/...`). |
 | `metadata_detail` | `str \| None` | Summary/detail text extracted from `.detail` block on the list page. |
+| `event_id` | `str \| None` | Event token parsed from the event URL. |
+| `channel_name` | `str \| None` | Channel display name. |
+| `detailed_description` | `str` | Detail page body text (empty string until fetched). |
 
 ### Optional hooks
 

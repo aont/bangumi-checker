@@ -809,10 +809,7 @@ async def evaluate_broadcast_events(
         await before_evaluate_events()
 
     for row in rows:
-        metadata = {k: row[k] for k in row.keys() if k.startswith("metadata_")}
-        metadata["contents_id"] = row["contents_id"]
-        metadata["program_date"] = row["program_date"]
-        metadata["href"] = row["href"]
+        metadata = {k: row[k] for k in row.keys()}
         result = await evaluate_event(metadata)
         if not isinstance(result, bool):
             raise SystemExit(f"evaluate_event must return bool (event id={row['id']})")
