@@ -468,6 +468,7 @@ def parse_args() -> argparse.Namespace:
 
     fetch_parser = subparsers.add_parser(
         "fetch-broadcast-events",
+        aliases=["fetch"],
         help="Fetch broadcast events and store them in SQLite",
     )
     fetch_parser.add_argument("--date", help="Broadcast date (YYYYMMDD). Defaults to today")
@@ -484,6 +485,7 @@ def parse_args() -> argparse.Namespace:
 
     fetch_detail_parser = subparsers.add_parser(
         "fetch-broadcast-event-details",
+        aliases=["fetch-broadcast-events-details", "detail"],
         help="Fetch detailed description for stored broadcast events",
     )
     fetch_detail_parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
@@ -492,6 +494,7 @@ def parse_args() -> argparse.Namespace:
 
     evaluate_parser = subparsers.add_parser(
         "evaluate-broadcast-events",
+        aliases=["eval"],
         help="Evaluate broadcast events with user code and print rows returning True",
     )
     evaluate_parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
@@ -511,7 +514,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.command == "fetch-broadcast-events":
+    if args.command in {"fetch-broadcast-events", "fetch"}:
         date = args.date or datetime.date.today().strftime("%Y%m%d")
         if len(date) != 8 or not date.isdigit():
             raise SystemExit("--date must be YYYYMMDD")
@@ -524,13 +527,17 @@ def main() -> None:
         asyncio.run(collect(date, args.db, args.timeout, group_ids))
         return
 
-    if args.command == "fetch-broadcast-event-details":
+    if args.command in {
+        "fetch-broadcast-event-details",
+        "fetch-broadcast-events-details",
+        "detail",
+    }:
         if args.limit <= 0:
             raise SystemExit("--limit must be greater than 0")
         asyncio.run(fetch_event_details(args.db, args.limit, args.timeout))
         return
 
-    if args.command == "evaluate-broadcast-events":
+    if args.command in {"evaluate-broadcast-events", "eval"}:
         asyncio.run(evaluate_broadcast_events(args.db, args.code_path, force=args.force))
         return
 
