@@ -674,6 +674,9 @@ async def periodic_update_and_evaluate(
 
             if fetched_ids:
                 await evaluate_with_lock(row_ids=fetched_ids)
+                # Keep spacing between detail HTTP requests even though this worker
+                # fetches one row per loop (limit=1).
+                await sleep_detail_request_interval()
 
             if run_once:
                 return
