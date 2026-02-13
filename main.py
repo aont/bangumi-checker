@@ -662,7 +662,9 @@ async def periodic_update_and_evaluate(
         LOGGER.info("detail fetch worker started")
         while True:
             try:
-                fetched_ids = await fetch_event_details(db, timeout)
+                # Fetch one detail row at a time so user-defined hooks run right after
+                # each newly-fetched detailed description is persisted.
+                fetched_ids = await fetch_event_details(db, timeout, limit=1)
             except Exception:
                 LOGGER.exception("detail fetch worker failed; retrying in 1 minute")
                 if run_once:
