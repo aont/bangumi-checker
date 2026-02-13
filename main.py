@@ -7,6 +7,7 @@ import importlib.util
 import inspect
 import json
 import pathlib
+import random
 import sys
 import uuid
 from dataclasses import dataclass
@@ -39,6 +40,10 @@ async def fetch_html(session: aiohttp.ClientSession, req: SourceRequest) -> str:
     async with session.get(req.url) as response:
         response.raise_for_status()
         return await response.text()
+
+
+async def sleep_request_interval() -> None:
+    await asyncio.sleep(random.uniform(2, 7))
 
 
 def parse_channel_names(tree: html.HtmlElement) -> list[str]:
@@ -289,8 +294,11 @@ async def collect(date: str, db_path: str, timeout: int, ggm_group_ids: list[int
     async with aiohttp.ClientSession(timeout=timeout_conf) as session, aiosqlite.connect(db_path) as db:
         await init_db(db)
 
-        html_results = await asyncio.gather(*(fetch_html(session, req) for req in requests))
-        for req, source_html in zip(requests, html_results, strict=True):
+        for index, req in enumerate(requests):
+            if index > 0:
+                await sleep_request_interval()
+
+            source_html = await fetch_html(session, req)
             rows = parse_event_rows(req, source_html)
             await store_rows(db, req, rows)
             area = f" group={req.ggm_group_id}" if req.ggm_group_id is not None else ""
@@ -341,7 +349,10 @@ async def fetch_event_details(db_path: str, limit: int, timeout: int) -> None:
         timeout_conf = aiohttp.ClientTimeout(total=timeout)
         fetched_count = 0
         async with aiohttp.ClientSession(timeout=timeout_conf) as session:
-            for row in targets:
+            for index, row in enumerate(targets):
+                if index > 0:
+                    await sleep_request_interval()
+
                 async with session.get(row["event_url"]) as response:
                     response.raise_for_status()
                     raw_html = await response.text()
