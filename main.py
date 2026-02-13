@@ -198,10 +198,10 @@ def parse_event_rows(req: SourceRequest, raw_html: str) -> list[dict]:
                     "style_top_px": top_px,
                     "style_height_px": height_px,
                     "metadata_title": data_json.get("title") if data_json else None,
-                    "metadata_contents_id": data_json.get("contentsId") if data_json else None,
+                    "contents_id": data_json.get("contentsId") if data_json else None,
                     "metadata_program_id": data_json.get("programId") if data_json else None,
-                    "metadata_program_date": data_json.get("programDate") if data_json else None,
-                    "metadata_href": href,
+                    "program_date": data_json.get("programDate") if data_json else None,
+                    "href": href,
                     "metadata_detail": " ".join(detail_node[0].itertext()).strip() if detail_node else None,
                 }
             )
@@ -263,10 +263,10 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
             style_top_px INTEGER,
             style_height_px INTEGER,
             metadata_title TEXT,
-            metadata_contents_id INTEGER,
+            contents_id INTEGER,
             metadata_program_id TEXT,
-            metadata_program_date TEXT,
-            metadata_href TEXT,
+            program_date TEXT,
+            href TEXT,
             metadata_detail TEXT,
             user_function_returned_true INTEGER NOT NULL DEFAULT 0,
             user_function_returned_false INTEGER NOT NULL DEFAULT 0,
@@ -280,6 +280,16 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
     )
     async with db.execute("PRAGMA table_info(broadcast_events)") as cursor:
         existing_columns = {row[1] for row in await cursor.fetchall()}
+    if "metadata_contents_id" in existing_columns and "contents_id" not in existing_columns:
+        await db.execute(
+            "ALTER TABLE broadcast_events RENAME COLUMN metadata_contents_id TO contents_id"
+        )
+    if "metadata_program_date" in existing_columns and "program_date" not in existing_columns:
+        await db.execute(
+            "ALTER TABLE broadcast_events RENAME COLUMN metadata_program_date TO program_date"
+        )
+    if "metadata_href" in existing_columns and "href" not in existing_columns:
+        await db.execute("ALTER TABLE broadcast_events RENAME COLUMN metadata_href TO href")
     if "user_function_returned_true" not in existing_columns:
         await db.execute(
             "ALTER TABLE broadcast_events ADD COLUMN user_function_returned_true INTEGER NOT NULL DEFAULT 0"
@@ -348,10 +358,10 @@ EVENT_COMPARE_FIELDS = [
     "style_top_px",
     "style_height_px",
     "metadata_title",
-    "metadata_contents_id",
+    "contents_id",
     "metadata_program_id",
-    "metadata_program_date",
-    "metadata_href",
+    "program_date",
+    "href",
     "metadata_detail",
 ]
 
@@ -409,9 +419,9 @@ async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[di
                     slot_minute, title, detail,
                     schedule_class, genre_class,
                     style_top_px, style_height_px,
-                    metadata_title, metadata_contents_id,
-                    metadata_program_id, metadata_program_date,
-                    metadata_href, metadata_detail,
+                    metadata_title, contents_id,
+                    metadata_program_id, program_date,
+                    href, metadata_detail,
                     detailed_description,
                     needs_user_evaluation
                 ) VALUES (
@@ -423,9 +433,9 @@ async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[di
                     :slot_minute, :title, :detail,
                     :schedule_class, :genre_class,
                     :style_top_px, :style_height_px,
-                    :metadata_title, :metadata_contents_id,
-                    :metadata_program_id, :metadata_program_date,
-                    :metadata_href, :metadata_detail,
+                    :metadata_title, :contents_id,
+                    :metadata_program_id, :program_date,
+                    :href, :metadata_detail,
                     '',
                     1
                 )
@@ -453,10 +463,10 @@ async def store_rows(db: aiosqlite.Connection, req: SourceRequest, rows: list[di
                     style_top_px = :style_top_px,
                     style_height_px = :style_height_px,
                     metadata_title = :metadata_title,
-                    metadata_contents_id = :metadata_contents_id,
+                    contents_id = :contents_id,
                     metadata_program_id = :metadata_program_id,
-                    metadata_program_date = :metadata_program_date,
-                    metadata_href = :metadata_href,
+                    program_date = :program_date,
+                    href = :href,
                     metadata_detail = :metadata_detail,
                     detail_fetched_at = NULL,
                     detailed_description = '',
@@ -800,6 +810,9 @@ async def evaluate_broadcast_events(
 
     for row in rows:
         metadata = {k: row[k] for k in row.keys() if k.startswith("metadata_")}
+        metadata["contents_id"] = row["contents_id"]
+        metadata["program_date"] = row["program_date"]
+        metadata["href"] = row["href"]
         result = await evaluate_event(metadata)
         if not isinstance(result, bool):
             raise SystemExit(f"evaluate_event must return bool (event id={row['id']})")

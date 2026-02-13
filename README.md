@@ -99,7 +99,7 @@ All logs include timestamps, and the global log level can be controlled via `--l
 
 ### `evaluate_event(metadata: dict) -> bool`
 
-- **Input**: `metadata` is a dictionary that includes only keys starting with `metadata_` from the `broadcast_events` row.
+- **Input**: `metadata` is a dictionary that includes metadata fields from the `broadcast_events` row: `metadata_*` keys plus `contents_id`, `program_date`, and `href`.
 - **Output**: must return `True` or `False`.
 
 `metadata` keys:
@@ -107,10 +107,10 @@ All logs include timestamps, and the global log level can be controlled via `--l
 | Key | Type | Description |
 | --- | --- | --- |
 | `metadata_title` | `str \| None` | Program title parsed from `data-content.title`. |
-| `metadata_contents_id` | `int \| None` | Contents ID parsed from `data-content.contentsId`. |
+| `contents_id` | `int \| None` | Contents ID parsed from `data-content.contentsId`. |
 | `metadata_program_id` | `str \| None` | Program ID parsed from `data-content.programId`. |
-| `metadata_program_date` | `str \| None` | Program date parsed from `data-content.programDate`. |
-| `metadata_href` | `str \| None` | Relative link from `a.title_link[href]` (example: `/tv_events/...`). |
+| `program_date` | `str \| None` | Program date parsed from `data-content.programDate`. |
+| `href` | `str \| None` | Relative link from `a.title_link[href]` (example: `/tv_events/...`). |
 | `metadata_detail` | `str \| None` | Summary/detail text extracted from `.detail` block on the list page. |
 
 ### Optional hooks
