@@ -1,6 +1,6 @@
 # bangumi-checker
 
-`fetch_broadcast_events.py` retrieves program events from bangumi.org EPG pages and stores them in SQLite.
+`main.py` provides a CLI to fetch program events from bangumi.org EPG pages and store them in SQLite, and to print stored rows.
 
 ## Requirements
 
@@ -10,11 +10,20 @@ pip install -r requirements.txt
 
 ## Usage
 
+Fetch and store events (`--date` omitted then today):
+
 ```bash
-python fetch_broadcast_events.py --date 20260213 --db broadcast_events.sqlite3
+python main.py fetch-broadcast-events --db broadcast_events.sqlite3
+python main.py fetch-broadcast-events --date 20260213 --db broadcast_events.sqlite3
 ```
 
-The script fetches:
+Show stored events (all dates are output):
+
+```bash
+python main.py show-stored-events --db broadcast_events.sqlite3 --limit 20
+```
+
+The fetch command retrieves:
 
 - Terrestrial (`ggm_group_id`: 37, 40, 42, 45)
 - BS

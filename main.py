@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import datetime
 import json
 from dataclasses import dataclass
 from typing import Optional
@@ -219,19 +220,109 @@ async def collect(date: str, db_path: str, timeout: int) -> None:
             print(f"stored {len(rows):4d} rows for {req.source_type}{area}")
 
 
+async def print_stored_events(
+    db_path: str,
+    source_type: Optional[str],
+    ggm_group_id: Optional[int],
+    limit: int,
+) -> None:
+    query = """
+        SELECT
+            source_type,
+            broadcast_date,
+            ggm_group_id,
+            channel_index,
+            channel_name,
+            title,
+            start_at,
+            end_at,
+            event_url
+        FROM broadcast_events
+    """
+    clauses: list[str] = []
+    values: list[object] = []
+    if source_type is not None:
+        clauses.append("source_type = ?")
+        values.append(source_type)
+    if ggm_group_id is not None:
+        clauses.append("ggm_group_id = ?")
+        values.append(ggm_group_id)
+
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+
+    query += " ORDER BY broadcast_date DESC, source_type, channel_index, start_at LIMIT ?"
+    values.append(limit)
+
+    async with aiosqlite.connect(db_path) as db:
+        await init_db(db)
+        db.row_factory = aiosqlite.Row
+        async with db.execute(query, values) as cursor:
+            rows = await cursor.fetchall()
+
+    if not rows:
+        print("no rows found")
+        return
+
+    for row in rows:
+        print(
+            json.dumps(
+                {
+                    "source_type": row["source_type"],
+                    "broadcast_date": row["broadcast_date"],
+                    "ggm_group_id": row["ggm_group_id"],
+                    "channel_index": row["channel_index"],
+                    "channel_name": row["channel_name"],
+                    "title": row["title"],
+                    "start_at": row["start_at"],
+                    "end_at": row["end_at"],
+                    "event_url": row["event_url"],
+                },
+                ensure_ascii=False,
+            )
+        )
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch broadcast events and store them in SQLite.")
-    parser.add_argument("--date", required=True, help="Broadcast date (YYYYMMDD)")
-    parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
-    parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout in seconds")
+    parser = argparse.ArgumentParser(description="Bangumi checker CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    fetch_parser = subparsers.add_parser(
+        "fetch-broadcast-events",
+        help="Fetch broadcast events and store them in SQLite",
+    )
+    fetch_parser.add_argument("--date", help="Broadcast date (YYYYMMDD). Defaults to today")
+    fetch_parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
+    fetch_parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout in seconds")
+
+    show_parser = subparsers.add_parser(
+        "show-stored-events",
+        help="Print stored events from SQLite",
+    )
+    show_parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
+    show_parser.add_argument("--source-type", choices=["terrestrial", "bs", "cs"], help="Filter by source type")
+    show_parser.add_argument("--ggm-group-id", type=int, help="Filter by terrestrial ggm_group_id")
+    show_parser.add_argument("--limit", type=int, default=100, help="Max rows to print")
+
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if len(args.date) != 8 or not args.date.isdigit():
-        raise SystemExit("--date must be YYYYMMDD")
-    asyncio.run(collect(args.date, args.db, args.timeout))
+    if args.command == "fetch-broadcast-events":
+        date = args.date or datetime.date.today().strftime("%Y%m%d")
+        if len(date) != 8 or not date.isdigit():
+            raise SystemExit("--date must be YYYYMMDD")
+        asyncio.run(collect(date, args.db, args.timeout))
+        return
+
+    if args.command == "show-stored-events":
+        if args.limit <= 0:
+            raise SystemExit("--limit must be greater than 0")
+        asyncio.run(print_stored_events(args.db, args.source_type, args.ggm_group_id, args.limit))
+        return
+
+    raise SystemExit(f"unknown command: {args.command}")
 
 
 if __name__ == "__main__":
