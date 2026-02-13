@@ -535,7 +535,11 @@ def extract_event_token(event_url: Optional[str]) -> Optional[str]:
     return path.rsplit("/", 1)[-1] or None
 
 
-async def fetch_event_details(db: aiosqlite.Connection, timeout: int, limit: Optional[int] = None) -> int:
+async def fetch_event_details(
+    db: aiosqlite.Connection,
+    timeout: int,
+    limit: Optional[int] = None,
+) -> list[int]:
     await ensure_db_schema(db)
     db.row_factory = aiosqlite.Row
 
@@ -564,7 +568,7 @@ async def fetch_event_details(db: aiosqlite.Connection, timeout: int, limit: Opt
     pending_count = pending_count_row["c"] if pending_count_row else 0
     if pending_count == 0:
         LOGGER.info("all items already have detailed information retrieved")
-        return 0
+        return []
 
     detail_select_sql = """
         SELECT id, event_url, event_id
@@ -585,10 +589,10 @@ async def fetch_event_details(db: aiosqlite.Connection, timeout: int, limit: Opt
 
     if not targets:
         LOGGER.info("no rows found")
-        return 0
+        return []
 
     timeout_conf = aiohttp.ClientTimeout(total=timeout)
-    fetched_count = 0
+    fetched_ids: list[int] = []
     async with aiohttp.ClientSession(timeout=timeout_conf) as session:
         for index, row in enumerate(targets):
             if index > 0:
@@ -602,7 +606,9 @@ async def fetch_event_details(db: aiosqlite.Connection, timeout: int, limit: Opt
             await db.execute(
                 """
                 UPDATE broadcast_events
-                SET detailed_description = ?, detail_fetched_at = datetime('now')
+                SET detailed_description = ?,
+                    detail_fetched_at = datetime('now'),
+                    needs_user_evaluation = 1
                 WHERE id = ?
                 """,
                 (detailed_description, row["id"]),
@@ -614,12 +620,12 @@ async def fetch_event_details(db: aiosqlite.Connection, timeout: int, limit: Opt
                 row["id"],
                 event_token or "",
             )
-            fetched_count += 1
+            fetched_ids.append(row["id"])
 
-    if fetched_count > 0:
+    if fetched_ids:
         await set_last_event_detail_fetched_at(db)
         await db.commit()
-    return fetched_count
+    return fetched_ids
 
 
 def upcoming_dates(days_ahead: int = 7) -> list[str]:
@@ -635,11 +641,28 @@ async def periodic_update_and_evaluate(
     interval_hours: int,
     run_once: bool,
 ) -> None:
+    evaluate_lock = asyncio.Lock()
+
+    async def evaluate_with_lock(
+        *,
+        force: bool = False,
+        broadcast_dates: Optional[list[str]] = None,
+        row_ids: Optional[list[int]] = None,
+    ) -> None:
+        async with evaluate_lock:
+            await evaluate_broadcast_events(
+                db,
+                code_path,
+                force=force,
+                broadcast_dates=broadcast_dates,
+                row_ids=row_ids,
+            )
+
     async def detail_fetch_loop() -> None:
         LOGGER.info("detail fetch worker started")
         while True:
             try:
-                fetched_count = await fetch_event_details(db, timeout)
+                fetched_ids = await fetch_event_details(db, timeout)
             except Exception:
                 LOGGER.exception("detail fetch worker failed; retrying in 1 minute")
                 if run_once:
@@ -647,9 +670,12 @@ async def periodic_update_and_evaluate(
                 await asyncio.sleep(60)
                 continue
 
+            if fetched_ids:
+                await evaluate_with_lock(row_ids=fetched_ids)
+
             if run_once:
                 return
-            if fetched_count == 0:
+            if not fetched_ids:
                 LOGGER.info(
                     "detail fetch worker idle; sleeping for %s seconds",
                     DETAIL_FETCH_IDLE_SLEEP_SECONDS,
@@ -663,7 +689,7 @@ async def periodic_update_and_evaluate(
             LOGGER.info("starting update cycle for dates %s to %s", dates[0], dates[-1])
             for date in dates:
                 await collect_for_dates([date], db, timeout, ggm_group_ids)
-                await evaluate_broadcast_events(db, code_path, broadcast_dates=[date])
+                await evaluate_with_lock(broadcast_dates=[date])
             if run_once:
                 await detail_worker
                 return
@@ -725,6 +751,7 @@ async def evaluate_broadcast_events(
     code_path: str,
     force: bool = False,
     broadcast_dates: Optional[list[str]] = None,
+    row_ids: Optional[list[int]] = None,
 ) -> None:
     user_code = pathlib.Path(code_path)
     if not user_code.exists() or not user_code.is_file():
@@ -746,6 +773,10 @@ async def evaluate_broadcast_events(
         placeholders = ",".join("?" for _ in broadcast_dates)
         where_conditions.append(f"broadcast_date IN ({placeholders})")
         params.extend(broadcast_dates)
+    if row_ids:
+        placeholders = ",".join("?" for _ in row_ids)
+        where_conditions.append(f"id IN ({placeholders})")
+        params.extend(row_ids)
     where_clause = f"WHERE {' AND '.join(where_conditions)}" if where_conditions else ""
     async with db.execute(
         f"""
