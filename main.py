@@ -37,8 +37,7 @@ DETAIL_FETCH_IDLE_SLEEP_SECONDS = 20
 ACTIVE_BROADCAST_CONDITION = """
 (
     li_end_at IS NULL
-    OR datetime(li_end_at) IS NULL
-    OR datetime(li_end_at) > datetime('now', 'localtime')
+    OR li_end_at > CAST(strftime('%s', 'now') AS INTEGER)
 )
 """
 
@@ -111,13 +110,16 @@ def parse_channel_names(tree: html.HtmlElement) -> list[str]:
     return channels
 
 
-def normalize_li_timestamp(raw_value: Optional[str]) -> Optional[str]:
+def normalize_li_timestamp(raw_value: Optional[str]) -> Optional[int]:
     if not raw_value:
-        return raw_value
+        return None
     value = raw_value.strip()
-    if len(value) == 12 and value.isdigit():
-        return f"{value[0:4]}-{value[4:6]}-{value[6:8]} {value[8:10]}:{value[10:12]}:00"
-    return value
+    if value.isdigit():
+        if len(value) == 12:
+            parsed = datetime.datetime.strptime(value, "%Y%m%d%H%M")
+            return int(parsed.timestamp())
+        return int(value)
+    return None
 
 
 def parse_event_rows(req: SourceRequest, raw_html: str) -> list[dict]:
@@ -208,13 +210,19 @@ def parse_event_rows(req: SourceRequest, raw_html: str) -> list[dict]:
     return rows
 
 
-def _parse_li_end_at(li_end_at: Optional[str]) -> Optional[datetime.datetime]:
+def _parse_li_end_at(li_end_at: Optional[int | str]) -> Optional[int]:
     if not li_end_at:
         return None
+    if isinstance(li_end_at, int):
+        return li_end_at
+
     normalized = li_end_at.strip().replace("T", " ")
+    if normalized.isdigit():
+        return int(normalized)
+
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y%m%d %H%M", "%Y%m%d%H%M"):
         try:
-            return datetime.datetime.strptime(normalized, fmt)
+            return int(datetime.datetime.strptime(normalized, fmt).timestamp())
         except ValueError:
             continue
     return None
@@ -224,7 +232,7 @@ def is_not_finished_event(row: dict, now: Optional[datetime.datetime] = None) ->
     end_at = _parse_li_end_at(row.get("li_end_at"))
     if end_at is None:
         return True
-    current = now or datetime.datetime.now()
+    current = int((now or datetime.datetime.now()).timestamp())
     return end_at > current
 
 
@@ -253,8 +261,8 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
             event_url TEXT,
             li_program_id TEXT,
             li_service_event_id TEXT,
-            li_start_at TEXT,
-            li_end_at TEXT,
+            li_start_at INTEGER,
+            li_end_at INTEGER,
             slot_minute TEXT,
             title TEXT,
             detail TEXT,
@@ -272,8 +280,8 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
             user_function_returned_false INTEGER NOT NULL DEFAULT 0,
             user_function_never_executed INTEGER NOT NULL DEFAULT 1,
             detailed_description TEXT NOT NULL DEFAULT '',
-            detail_fetched_at TEXT,
-            inserted_at TEXT NOT NULL DEFAULT (datetime('now'))
+            detail_fetched_at INTEGER,
+            inserted_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER))
         )
         """
     )
@@ -314,8 +322,8 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS fetch_status (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            last_broadcast_events_fetched_at TEXT,
-            last_event_detail_fetched_at TEXT
+            last_broadcast_events_fetched_at INTEGER,
+            last_event_detail_fetched_at INTEGER
         )
         """
     )
@@ -330,13 +338,13 @@ async def ensure_db_schema(db: aiosqlite.Connection) -> None:
 
 async def set_last_broadcast_events_fetched_at(db: aiosqlite.Connection) -> None:
     await db.execute(
-        "UPDATE fetch_status SET last_broadcast_events_fetched_at = datetime('now') WHERE id = 1"
+        "UPDATE fetch_status SET last_broadcast_events_fetched_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE id = 1"
     )
 
 
 async def set_last_event_detail_fetched_at(db: aiosqlite.Connection) -> None:
     await db.execute(
-        "UPDATE fetch_status SET last_event_detail_fetched_at = datetime('now') WHERE id = 1"
+        "UPDATE fetch_status SET last_event_detail_fetched_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE id = 1"
     )
 
 
@@ -550,8 +558,8 @@ async def fetch_event_details(
         DELETE FROM broadcast_events
         WHERE event_url IS NOT NULL
           AND detail_fetched_at IS NULL
-          AND datetime(li_end_at) IS NOT NULL
-          AND datetime(li_end_at) <= datetime('now', 'localtime')
+          AND li_end_at IS NOT NULL
+          AND li_end_at <= CAST(strftime('%s', 'now') AS INTEGER)
         """
     )
     await db.commit()
@@ -579,7 +587,7 @@ async def fetch_event_details(
           AND detail_fetched_at IS NULL
           AND
     """ + ACTIVE_BROADCAST_CONDITION + """
-        ORDER BY COALESCE(detail_fetched_at, '1970-01-01 00:00:00') ASC, li_start_at ASC
+        ORDER BY COALESCE(detail_fetched_at, 0) ASC, li_start_at ASC
     """
     if limit is not None:
         detail_select_sql += " LIMIT ?"
@@ -609,7 +617,7 @@ async def fetch_event_details(
                 """
                 UPDATE broadcast_events
                 SET detailed_description = ?,
-                    detail_fetched_at = datetime('now')
+                    detail_fetched_at = CAST(strftime('%s', 'now') AS INTEGER)
                 WHERE id = ?
                 """,
                 (detailed_description, row["id"]),
