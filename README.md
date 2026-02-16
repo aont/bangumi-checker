@@ -65,6 +65,24 @@ Run a single update/evaluate cycle and exit:
 python main.py periodic-update --db broadcast_events.sqlite3 --code-path ./example/title_marker_filter.py --once
 ```
 
+
+Run a backend server with watch-equivalent workers and HTTP API:
+
+```bash
+python main.py serve-watch --db broadcast_events.sqlite3 --code-path ./example/title_marker_filter.py --host 127.0.0.1 --port 8080
+```
+
+`serve-watch` starts the same periodic update/evaluation and detail-fetch workers as `watch`, and exposes APIs to operate at runtime:
+
+- `GET /health`: health check
+- `GET /api/status`: processing status and queue counters
+- `GET /api/script`: read current user script content
+- `PUT /api/script`: replace user script (`{"content":"...python code..."}`)
+- `GET /api/config`: read runtime config
+- `PATCH /api/config`: update runtime config (`timeout`, `interval_hours`, `ggm_group_ids`, `code_path`, `enabled`)
+
+When `enabled=false`, background workers pause.
+
 `example/title_marker_filter.py` must define:
 
 ```python

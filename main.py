@@ -13,11 +13,12 @@ import random
 import sys
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
 import aiosqlite
+from aiohttp import web
 from lxml import html
 
 BASE_URL = "https://bangumi.org"
@@ -40,6 +41,24 @@ ACTIVE_BROADCAST_CONDITION = """
     OR li_end_at > CAST(strftime('%s', 'now') AS INTEGER)
 )
 """
+
+
+@dataclass
+class RuntimeConfig:
+    timeout: int
+    ggm_group_ids: list[int]
+    code_path: str
+    interval_hours: int
+    enabled: bool = True
+
+
+@dataclass
+class ServeRuntimeState:
+    config: RuntimeConfig
+    phase: str = "idle"
+    last_cycle_started_at: Optional[int] = None
+    last_cycle_finished_at: Optional[int] = None
+    last_error: Optional[str] = None
 
 
 def configure_logging(log_level: str) -> None:
@@ -829,6 +848,241 @@ async def evaluate_broadcast_events(
     LOGGER.info("matched %s / %s events checked %s", matched_count, len(rows), summary_suffix)
 
 
+
+async def _runtime_cycle_loop(db: aiosqlite.Connection, state: ServeRuntimeState) -> None:
+    evaluate_lock = asyncio.Lock()
+
+    async def evaluate_with_lock(
+        *,
+        force: bool = False,
+        broadcast_dates: Optional[list[str]] = None,
+        row_ids: Optional[list[int]] = None,
+    ) -> None:
+        async with evaluate_lock:
+            await evaluate_broadcast_events(
+                db,
+                state.config.code_path,
+                force=force,
+                broadcast_dates=broadcast_dates,
+                row_ids=row_ids,
+            )
+
+    async def detail_fetch_loop() -> None:
+        LOGGER.info("detail fetch worker started")
+        while True:
+            if not state.config.enabled:
+                await asyncio.sleep(1)
+                continue
+            try:
+                fetched_ids = await fetch_event_details(db, state.config.timeout, limit=1)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                state.last_error = "detail fetch worker failed"
+                LOGGER.exception("detail fetch worker failed; retrying in 1 minute")
+                await asyncio.sleep(60)
+                continue
+
+            if fetched_ids:
+                await evaluate_with_lock(row_ids=fetched_ids)
+                await sleep_detail_request_interval()
+
+            if not fetched_ids:
+                await asyncio.sleep(DETAIL_FETCH_IDLE_SLEEP_SECONDS)
+
+    detail_worker = asyncio.create_task(detail_fetch_loop())
+    try:
+        while True:
+            if not state.config.enabled:
+                state.phase = "paused"
+                await asyncio.sleep(1)
+                continue
+
+            state.phase = "updating"
+            state.last_cycle_started_at = int(datetime.datetime.now().timestamp())
+            dates = upcoming_dates(7)
+            LOGGER.info("starting update cycle for dates %s to %s", dates[0], dates[-1])
+            for date in dates:
+                await collect_for_dates([date], db, state.config.timeout, state.config.ggm_group_ids)
+                await evaluate_with_lock(broadcast_dates=[date])
+
+            state.last_cycle_finished_at = int(datetime.datetime.now().timestamp())
+            state.phase = "sleeping"
+            LOGGER.info("cycle complete; sleeping for %s hours", state.config.interval_hours)
+            await asyncio.sleep(state.config.interval_hours * 60 * 60)
+    finally:
+        if not detail_worker.done():
+            detail_worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await detail_worker
+
+
+async def _read_json_payload(request: web.Request) -> dict[str, Any]:
+    if request.content_type != "application/json":
+        raise web.HTTPBadRequest(text="Content-Type must be application/json")
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="JSON body must be object")
+    return payload
+
+
+async def serve_watch_api(
+    db_path: str,
+    timeout: int,
+    ggm_group_ids: list[int],
+    code_path: str,
+    interval_hours: int,
+    host: str,
+    port: int,
+) -> None:
+    config = RuntimeConfig(
+        timeout=timeout,
+        ggm_group_ids=ggm_group_ids,
+        code_path=code_path,
+        interval_hours=interval_hours,
+    )
+    state = ServeRuntimeState(config=config)
+
+    async with connect_db(db_path) as db:
+        await ensure_db_schema(db)
+        cycle_task = asyncio.create_task(_runtime_cycle_loop(db, state))
+
+        async def handle_health(_: web.Request) -> web.Response:
+            return web.json_response({"ok": True})
+
+        async def handle_status(_: web.Request) -> web.Response:
+            last_broadcast_events_fetched_at = None
+            last_event_detail_fetched_at = None
+            async with db.execute(
+                "SELECT last_broadcast_events_fetched_at, last_event_detail_fetched_at FROM fetch_status WHERE id = 1"
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is not None:
+                last_broadcast_events_fetched_at = row[0]
+                last_event_detail_fetched_at = row[1]
+
+            async with db.execute(
+                "SELECT COUNT(*) FROM broadcast_events WHERE user_function_never_executed = 1 AND " + ACTIVE_BROADCAST_CONDITION
+            ) as cursor:
+                queue_row = await cursor.fetchone()
+            pending_evaluation_count = queue_row[0] if queue_row else 0
+
+            async with db.execute(
+                "SELECT COUNT(*) FROM broadcast_events WHERE detail_fetched_at IS NULL AND event_url IS NOT NULL AND "
+                + ACTIVE_BROADCAST_CONDITION
+            ) as cursor:
+                detail_row = await cursor.fetchone()
+            pending_detail_count = detail_row[0] if detail_row else 0
+
+            return web.json_response(
+                {
+                    "phase": state.phase,
+                    "last_cycle_started_at": state.last_cycle_started_at,
+                    "last_cycle_finished_at": state.last_cycle_finished_at,
+                    "last_error": state.last_error,
+                    "config": {
+                        "timeout": state.config.timeout,
+                        "ggm_group_ids": state.config.ggm_group_ids,
+                        "code_path": state.config.code_path,
+                        "interval_hours": state.config.interval_hours,
+                        "enabled": state.config.enabled,
+                    },
+                    "db": {
+                        "last_broadcast_events_fetched_at": last_broadcast_events_fetched_at,
+                        "last_event_detail_fetched_at": last_event_detail_fetched_at,
+                        "pending_evaluation_count": pending_evaluation_count,
+                        "pending_detail_count": pending_detail_count,
+                    },
+                }
+            )
+
+        async def handle_get_script(_: web.Request) -> web.Response:
+            p = pathlib.Path(state.config.code_path)
+            if not p.exists():
+                raise web.HTTPNotFound(text="script file not found")
+            return web.json_response({"code_path": str(p), "content": p.read_text()})
+
+        async def handle_put_script(request: web.Request) -> web.Response:
+            payload = await _read_json_payload(request)
+            content = payload.get("content")
+            if not isinstance(content, str):
+                raise web.HTTPBadRequest(text="content must be string")
+            target = pathlib.Path(state.config.code_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+            return web.json_response({"ok": True, "code_path": str(target)})
+
+        async def handle_get_config(_: web.Request) -> web.Response:
+            return web.json_response(
+                {
+                    "timeout": state.config.timeout,
+                    "ggm_group_ids": state.config.ggm_group_ids,
+                    "code_path": state.config.code_path,
+                    "interval_hours": state.config.interval_hours,
+                    "enabled": state.config.enabled,
+                }
+            )
+
+        async def handle_patch_config(request: web.Request) -> web.Response:
+            payload = await _read_json_payload(request)
+            if "timeout" in payload:
+                timeout_value = payload["timeout"]
+                if not isinstance(timeout_value, int) or timeout_value <= 0:
+                    raise web.HTTPBadRequest(text="timeout must be integer > 0")
+                state.config.timeout = timeout_value
+            if "interval_hours" in payload:
+                interval_hours_value = payload["interval_hours"]
+                if not isinstance(interval_hours_value, int) or interval_hours_value <= 0:
+                    raise web.HTTPBadRequest(text="interval_hours must be integer > 0")
+                state.config.interval_hours = interval_hours_value
+            if "ggm_group_ids" in payload:
+                group_ids_value = payload["ggm_group_ids"]
+                if not isinstance(group_ids_value, list) or not group_ids_value:
+                    raise web.HTTPBadRequest(text="ggm_group_ids must be non-empty list")
+                if not all(isinstance(gid, int) for gid in group_ids_value):
+                    raise web.HTTPBadRequest(text="ggm_group_ids values must be integers")
+                invalid_group_ids = [gid for gid in group_ids_value if gid not in TERRESTRIAL_GROUPS]
+                if invalid_group_ids:
+                    supported = ", ".join(str(gid) for gid in TERRESTRIAL_GROUPS)
+                    invalid = ", ".join(str(gid) for gid in invalid_group_ids)
+                    raise web.HTTPBadRequest(text=f"unsupported ggm_group_ids: {invalid} (supported: {supported})")
+                state.config.ggm_group_ids = group_ids_value
+            if "code_path" in payload:
+                code_path_value = payload["code_path"]
+                if not isinstance(code_path_value, str) or not code_path_value.strip():
+                    raise web.HTTPBadRequest(text="code_path must be non-empty string")
+                state.config.code_path = code_path_value
+            if "enabled" in payload:
+                enabled_value = payload["enabled"]
+                if not isinstance(enabled_value, bool):
+                    raise web.HTTPBadRequest(text="enabled must be bool")
+                state.config.enabled = enabled_value
+
+            return await handle_get_config(request)
+
+        app = web.Application()
+        app.router.add_get("/health", handle_health)
+        app.router.add_get("/api/status", handle_status)
+        app.router.add_get("/api/script", handle_get_script)
+        app.router.add_put("/api/script", handle_put_script)
+        app.router.add_get("/api/config", handle_get_config)
+        app.router.add_patch("/api/config", handle_patch_config)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host=host, port=port)
+        await site.start()
+        LOGGER.info("serve-watch API listening on http://%s:%s", host, port)
+
+        try:
+            await asyncio.Future()
+        finally:
+            cycle_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cycle_task
+            await runner.cleanup()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Bangumi checker CLI")
     parser.add_argument(
@@ -914,6 +1168,35 @@ def parse_args() -> argparse.Namespace:
         help="Run a single update/evaluate cycle and exit",
     )
 
+    serve_parser = subparsers.add_parser(
+        "serve-watch",
+        aliases=["serve"],
+        help="Run watch-like workers and expose HTTP API for script/config/status management",
+    )
+    serve_parser.add_argument("--db", default="broadcast_events.sqlite3", help="SQLite DB path")
+    serve_parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout in seconds")
+    serve_parser.add_argument(
+        "--ggm-group-id",
+        dest="ggm_group_ids",
+        type=int,
+        action="append",
+        default=None,
+        help="Terrestrial ggm_group_id (repeatable). Defaults to Tokyo only (42)",
+    )
+    serve_parser.add_argument(
+        "--code-path",
+        required=True,
+        help="Path to Python file defining async evaluate_event(metadata) -> bool",
+    )
+    serve_parser.add_argument(
+        "--interval-hours",
+        type=int,
+        default=3,
+        help="Cycle interval in hours",
+    )
+    serve_parser.add_argument("--host", default="127.0.0.1", help="HTTP bind host")
+    serve_parser.add_argument("--port", type=int, default=8080, help="HTTP bind port")
+
     return parser.parse_args()
 
 
@@ -968,6 +1251,7 @@ def main() -> None:
             raise SystemExit(f"unsupported --ggm-group-id: {invalid} (supported: {supported})")
         if args.interval_hours <= 0:
             raise SystemExit("--interval-hours must be greater than 0")
+
         async def run_periodic() -> None:
             async with connect_db(args.db) as db:
                 await periodic_update_and_evaluate(
@@ -980,6 +1264,31 @@ def main() -> None:
                 )
 
         asyncio.run(run_periodic())
+        return
+
+    if args.command in {"serve-watch", "serve"}:
+        group_ids = args.ggm_group_ids if args.ggm_group_ids is not None else DEFAULT_GGM_GROUP_IDS
+        invalid_group_ids = [gid for gid in group_ids if gid not in TERRESTRIAL_GROUPS]
+        if invalid_group_ids:
+            supported = ", ".join(str(gid) for gid in TERRESTRIAL_GROUPS)
+            invalid = ", ".join(str(gid) for gid in invalid_group_ids)
+            raise SystemExit(f"unsupported --ggm-group-id: {invalid} (supported: {supported})")
+        if args.interval_hours <= 0:
+            raise SystemExit("--interval-hours must be greater than 0")
+        if args.port <= 0 or args.port > 65535:
+            raise SystemExit("--port must be between 1 and 65535")
+
+        asyncio.run(
+            serve_watch_api(
+                db_path=args.db,
+                timeout=args.timeout,
+                ggm_group_ids=group_ids,
+                code_path=args.code_path,
+                interval_hours=args.interval_hours,
+                host=args.host,
+                port=args.port,
+            )
+        )
         return
 
     raise SystemExit(f"unknown command: {args.command}")
