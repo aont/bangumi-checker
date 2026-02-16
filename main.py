@@ -11,6 +11,7 @@ import logging
 import pathlib
 import random
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -59,6 +60,28 @@ class ServeRuntimeState:
     last_cycle_started_at: Optional[int] = None
     last_cycle_finished_at: Optional[int] = None
     last_error: Optional[str] = None
+
+
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _json_query_int(request: web.Request, key: str) -> Optional[int]:
+    raw = request.query.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=f"{key} must be integer") from exc
 
 
 def configure_logging(log_level: str) -> None:
@@ -942,10 +965,36 @@ async def serve_watch_api(
         interval_hours=interval_hours,
     )
     state = ServeRuntimeState(config=config)
+    evaluate_lock = asyncio.Lock()
 
     async with connect_db(db_path) as db:
         await ensure_db_schema(db)
         cycle_task = asyncio.create_task(_runtime_cycle_loop(db, state))
+
+        async def evaluate_with_lock(
+            *,
+            force: bool = False,
+            broadcast_dates: Optional[list[str]] = None,
+            row_ids: Optional[list[int]] = None,
+        ) -> None:
+            async with evaluate_lock:
+                await evaluate_broadcast_events(
+                    db,
+                    state.config.code_path,
+                    force=force,
+                    broadcast_dates=broadcast_dates,
+                    row_ids=row_ids,
+                )
+
+        async def run_single_update_cycle() -> None:
+            dates = upcoming_dates(7)
+            state.phase = "updating"
+            state.last_cycle_started_at = int(datetime.datetime.now().timestamp())
+            for date in dates:
+                await collect_for_dates([date], db, state.config.timeout, state.config.ggm_group_ids)
+                await evaluate_with_lock(broadcast_dates=[date])
+            state.last_cycle_finished_at = int(datetime.datetime.now().timestamp())
+            state.phase = "idle"
 
         async def handle_health(_: web.Request) -> web.Response:
             return web.json_response({"ok": True})
@@ -1012,6 +1061,61 @@ async def serve_watch_api(
             target.write_text(content)
             return web.json_response({"ok": True, "code_path": str(target)})
 
+        async def handle_validate_script(request: web.Request) -> web.Response:
+            payload = await _read_json_payload(request)
+            content = payload.get("content")
+            if content is None:
+                script_path = pathlib.Path(state.config.code_path)
+                if not script_path.exists():
+                    raise web.HTTPNotFound(text="script file not found")
+                content = script_path.read_text()
+            if not isinstance(content, str):
+                raise web.HTTPBadRequest(text="content must be string")
+
+            temp_path: Optional[pathlib.Path] = None
+            try:
+                with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tmp:
+                    tmp.write(content)
+                    temp_path = pathlib.Path(tmp.name)
+                load_user_functions(str(temp_path))
+            except SystemExit as exc:
+                return web.json_response({"ok": False, "error": str(exc)}, status=400)
+            finally:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
+            return web.json_response({"ok": True})
+
+        async def handle_script_test_run(request: web.Request) -> web.Response:
+            payload = await _read_json_payload(request)
+            metadata = payload.get("metadata")
+            if not isinstance(metadata, dict):
+                raise web.HTTPBadRequest(text="metadata must be object")
+
+            content = payload.get("content")
+            script_path: Optional[pathlib.Path] = None
+            if content is not None:
+                if not isinstance(content, str):
+                    raise web.HTTPBadRequest(text="content must be string")
+                with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tmp:
+                    tmp.write(content)
+                    script_path = pathlib.Path(tmp.name)
+            else:
+                script_path = pathlib.Path(state.config.code_path)
+                if not script_path.exists():
+                    raise web.HTTPNotFound(text="script file not found")
+
+            try:
+                evaluate_event, _, _, _ = load_user_functions(str(script_path))
+                result = await evaluate_event(metadata)
+                if not isinstance(result, bool):
+                    raise web.HTTPBadRequest(text="evaluate_event must return bool")
+                return web.json_response({"ok": True, "matched": result})
+            except SystemExit as exc:
+                return web.json_response({"ok": False, "error": str(exc)}, status=400)
+            finally:
+                if content is not None and script_path is not None:
+                    script_path.unlink(missing_ok=True)
+
         async def handle_get_config(_: web.Request) -> web.Response:
             return web.json_response(
                 {
@@ -1060,13 +1164,239 @@ async def serve_watch_api(
 
             return await handle_get_config(request)
 
+        async def handle_action_run_once(_: web.Request) -> web.Response:
+            await run_single_update_cycle()
+            return web.json_response({"ok": True, "phase": state.phase})
+
+        async def handle_action_fetch_details(request: web.Request) -> web.Response:
+            payload = await _read_json_payload(request)
+            limit = payload.get("limit", 1)
+            if not isinstance(limit, int) or limit <= 0:
+                raise web.HTTPBadRequest(text="limit must be integer > 0")
+            fetched_ids = await fetch_event_details(db, state.config.timeout, limit=limit)
+            if fetched_ids:
+                await evaluate_with_lock(row_ids=fetched_ids)
+            return web.json_response({"ok": True, "fetched_ids": fetched_ids})
+
+        async def handle_action_evaluate(request: web.Request) -> web.Response:
+            payload = await _read_json_payload(request)
+            force = payload.get("force", False)
+            if not isinstance(force, bool):
+                raise web.HTTPBadRequest(text="force must be bool")
+            broadcast_dates = payload.get("broadcast_dates")
+            if broadcast_dates is not None:
+                if not isinstance(broadcast_dates, list) or not all(isinstance(v, str) for v in broadcast_dates):
+                    raise web.HTTPBadRequest(text="broadcast_dates must be list[str]")
+            row_ids = payload.get("row_ids")
+            if row_ids is not None:
+                if not isinstance(row_ids, list) or not all(isinstance(v, int) for v in row_ids):
+                    raise web.HTTPBadRequest(text="row_ids must be list[int]")
+            await evaluate_with_lock(force=force, broadcast_dates=broadcast_dates, row_ids=row_ids)
+            return web.json_response({"ok": True})
+
+        async def handle_action_requeue_evaluation(request: web.Request) -> web.Response:
+            payload = await _read_json_payload(request)
+            where_clauses: list[str] = []
+            params: list[Any] = []
+            broadcast_dates = payload.get("broadcast_dates")
+            if broadcast_dates is not None:
+                if not isinstance(broadcast_dates, list) or not all(isinstance(v, str) for v in broadcast_dates):
+                    raise web.HTTPBadRequest(text="broadcast_dates must be list[str]")
+                placeholders = ",".join("?" for _ in broadcast_dates)
+                where_clauses.append(f"broadcast_date IN ({placeholders})")
+                params.extend(broadcast_dates)
+            only_active = payload.get("only_active", True)
+            if not isinstance(only_active, bool):
+                raise web.HTTPBadRequest(text="only_active must be bool")
+            if only_active:
+                where_clauses.append(ACTIVE_BROADCAST_CONDITION)
+            where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            cur = await db.execute(
+                f"""
+                UPDATE broadcast_events
+                SET user_function_returned_true = 0,
+                    user_function_returned_false = 0,
+                    user_function_never_executed = 1
+                {where_sql}
+                """,
+                params,
+            )
+            await db.commit()
+            return web.json_response({"ok": True, "updated": cur.rowcount})
+
+        async def handle_action_requeue_detail(request: web.Request) -> web.Response:
+            payload = await _read_json_payload(request)
+            only_missing_url = payload.get("only_missing_url", False)
+            if not isinstance(only_missing_url, bool):
+                raise web.HTTPBadRequest(text="only_missing_url must be bool")
+            where_clauses: list[str] = []
+            if only_missing_url:
+                where_clauses.append("event_url IS NOT NULL")
+            where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            cur = await db.execute(
+                f"""
+                UPDATE broadcast_events
+                SET detail_fetched_at = NULL,
+                    detailed_description = ''
+                {where_sql}
+                """
+            )
+            await db.commit()
+            return web.json_response({"ok": True, "updated": cur.rowcount})
+
+        async def handle_action_reset_result(request: web.Request) -> web.Response:
+            payload = await _read_json_payload(request)
+            row_ids = payload.get("row_ids")
+            if not isinstance(row_ids, list) or not row_ids or not all(isinstance(v, int) for v in row_ids):
+                raise web.HTTPBadRequest(text="row_ids must be non-empty list[int]")
+            placeholders = ",".join("?" for _ in row_ids)
+            cur = await db.execute(
+                f"""
+                UPDATE broadcast_events
+                SET user_function_returned_true = 0,
+                    user_function_returned_false = 0,
+                    user_function_never_executed = 1
+                WHERE id IN ({placeholders})
+                """,
+                row_ids,
+            )
+            await db.commit()
+            return web.json_response({"ok": True, "updated": cur.rowcount})
+
+        def parse_event_filters(request: web.Request, forced_matched: Optional[bool] = None) -> tuple[str, list[Any], int, int]:
+            where_clauses: list[str] = []
+            params: list[Any] = []
+            broadcast_date_from = request.query.get("broadcast_date_from")
+            if broadcast_date_from:
+                where_clauses.append("broadcast_date >= ?")
+                params.append(broadcast_date_from)
+            broadcast_date_to = request.query.get("broadcast_date_to")
+            if broadcast_date_to:
+                where_clauses.append("broadcast_date <= ?")
+                params.append(broadcast_date_to)
+            source_type = request.query.get("source_type")
+            if source_type:
+                where_clauses.append("source_type = ?")
+                params.append(source_type)
+
+            ggm_group_id = _json_query_int(request, "ggm_group_id")
+            if ggm_group_id is not None:
+                where_clauses.append("ggm_group_id = ?")
+                params.append(ggm_group_id)
+
+            matched = forced_matched if forced_matched is not None else _coerce_bool(request.query.get("matched"))
+            if matched is not None:
+                where_clauses.append("user_function_returned_true = ?")
+                params.append(1 if matched else 0)
+
+            needs_detail = _coerce_bool(request.query.get("needs_detail"))
+            if needs_detail is not None:
+                where_clauses.append("detail_fetched_at IS NULL" if needs_detail else "detail_fetched_at IS NOT NULL")
+
+            only_active = _coerce_bool(request.query.get("only_active"))
+            if only_active:
+                where_clauses.append(ACTIVE_BROADCAST_CONDITION)
+
+            where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            limit = _json_query_int(request, "limit") or 100
+            offset = _json_query_int(request, "offset") or 0
+            if limit <= 0 or limit > 1000:
+                raise web.HTTPBadRequest(text="limit must be 1..1000")
+            if offset < 0:
+                raise web.HTTPBadRequest(text="offset must be >= 0")
+            return where_sql, params, limit, offset
+
+        async def handle_list_events(request: web.Request) -> web.Response:
+            where_sql, params, limit, offset = parse_event_filters(request)
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"""
+                SELECT *
+                FROM broadcast_events
+                {where_sql}
+                ORDER BY broadcast_date, source_type, COALESCE(ggm_group_id, -1), channel_index, li_start_at
+                LIMIT ? OFFSET ?
+                """,
+                [*params, limit, offset],
+            ) as cursor:
+                rows = await cursor.fetchall()
+            return web.json_response({"items": [dict(row) for row in rows], "limit": limit, "offset": offset})
+
+        async def handle_get_event(request: web.Request) -> web.Response:
+            event_id = _json_query_int(request, "id")
+            if event_id is None:
+                try:
+                    event_id = int(request.match_info["event_id"])
+                except ValueError as exc:
+                    raise web.HTTPBadRequest(text="event_id must be integer") from exc
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM broadcast_events WHERE id = ?", (event_id,)) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                raise web.HTTPNotFound(text="event not found")
+            return web.json_response(dict(row))
+
+        async def handle_list_matches(request: web.Request) -> web.Response:
+            where_sql, params, limit, offset = parse_event_filters(request, forced_matched=True)
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"""
+                SELECT *
+                FROM broadcast_events
+                {where_sql}
+                ORDER BY broadcast_date, source_type, COALESCE(ggm_group_id, -1), channel_index, li_start_at
+                LIMIT ? OFFSET ?
+                """,
+                [*params, limit, offset],
+            ) as cursor:
+                rows = await cursor.fetchall()
+            return web.json_response({"items": [dict(row) for row in rows], "limit": limit, "offset": offset})
+
+        async def handle_meta_terrestrial_groups(_: web.Request) -> web.Response:
+            return web.json_response(
+                {
+                    "items": [
+                        {"id": group_id, "name": name}
+                        for group_id, name in sorted(TERRESTRIAL_GROUPS.items(), key=lambda x: x[0])
+                    ]
+                }
+            )
+
+        async def handle_meta_config_schema(_: web.Request) -> web.Response:
+            return web.json_response(
+                {
+                    "timeout": {"type": "integer", "minimum": 1},
+                    "interval_hours": {"type": "integer", "minimum": 1},
+                    "ggm_group_ids": {
+                        "type": "array",
+                        "items": {"type": "integer", "enum": sorted(TERRESTRIAL_GROUPS.keys())},
+                        "minItems": 1,
+                    },
+                    "code_path": {"type": "string", "minLength": 1},
+                    "enabled": {"type": "boolean"},
+                }
+            )
+
         app = web.Application()
         app.router.add_get("/health", handle_health)
         app.router.add_get("/api/status", handle_status)
         app.router.add_get("/api/script", handle_get_script)
         app.router.add_put("/api/script", handle_put_script)
+        app.router.add_post("/api/script/validate", handle_validate_script)
+        app.router.add_post("/api/script/test-run", handle_script_test_run)
         app.router.add_get("/api/config", handle_get_config)
         app.router.add_patch("/api/config", handle_patch_config)
+        app.router.add_post("/api/actions/run-once", handle_action_run_once)
+        app.router.add_post("/api/actions/fetch-details", handle_action_fetch_details)
+        app.router.add_post("/api/actions/evaluate", handle_action_evaluate)
+        app.router.add_post("/api/actions/requeue-evaluation", handle_action_requeue_evaluation)
+        app.router.add_post("/api/actions/requeue-detail", handle_action_requeue_detail)
+        app.router.add_post("/api/actions/reset-result", handle_action_reset_result)
+        app.router.add_get("/api/events", handle_list_events)
+        app.router.add_get("/api/events/{event_id}", handle_get_event)
+        app.router.add_get("/api/matches", handle_list_matches)
+        app.router.add_get("/api/meta/terrestrial-groups", handle_meta_terrestrial_groups)
+        app.router.add_get("/api/meta/config-schema", handle_meta_config_schema)
 
         runner = web.AppRunner(app)
         await runner.setup()

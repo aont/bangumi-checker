@@ -78,8 +78,21 @@ python main.py serve-watch --db broadcast_events.sqlite3 --code-path ./example/t
 - `GET /api/status`: processing status and queue counters
 - `GET /api/script`: read current user script content
 - `PUT /api/script`: replace user script (`{"content":"...python code..."}`)
+- `POST /api/script/validate`: validate user script (`{"content":"...optional..."}`)
+- `POST /api/script/test-run`: run script against one metadata sample (`{"metadata": {...}, "content": "...optional..."}`)
 - `GET /api/config`: read runtime config
 - `PATCH /api/config`: update runtime config (`timeout`, `interval_hours`, `ggm_group_ids`, `code_path`, `enabled`)
+- `POST /api/actions/run-once`: run one immediate update/evaluate cycle
+- `POST /api/actions/fetch-details`: fetch detail rows immediately (`{"limit": 1}`)
+- `POST /api/actions/evaluate`: trigger evaluation (`{"force": false, "broadcast_dates": [...], "row_ids": [...]}`)
+- `POST /api/actions/requeue-evaluation`: mark rows as never evaluated again (`{"broadcast_dates": [...], "only_active": true}`)
+- `POST /api/actions/requeue-detail`: mark rows for detail refetch (`{"only_missing_url": false}`)
+- `POST /api/actions/reset-result`: reset selected rows by id (`{"row_ids": [1,2,3]}`)
+- `GET /api/events`: list events (filterable; e.g. `matched`, `needs_detail`, `broadcast_date_from`, `broadcast_date_to`, `limit`, `offset`)
+- `GET /api/events/{event_id}`: read one event row by id
+- `GET /api/matches`: list matched rows only
+- `GET /api/meta/terrestrial-groups`: supported `ggm_group_id` values
+- `GET /api/meta/config-schema`: runtime config schema metadata
 
 When `enabled=false`, background workers pause.
 
