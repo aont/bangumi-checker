@@ -1,7 +1,49 @@
 const byId = (id) => document.getElementById(id);
 
+const BACKEND_URL_STORAGE_KEY = "bangumi-checker.backend-base-url";
+
+function normalizeBackendBaseUrl(rawValue) {
+  const value = (rawValue || "").trim();
+  if (!value) {
+    return "";
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch (_error) {
+    throw new Error("Backend URL must be an absolute URL (e.g. http://127.0.0.1:8080)");
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("Backend URL must start with http:// or https://");
+  }
+
+  return parsed.origin;
+}
+
+function getBackendBaseUrl() {
+  return localStorage.getItem(BACKEND_URL_STORAGE_KEY) || "";
+}
+
+function setBackendBaseUrl(value) {
+  if (value) {
+    localStorage.setItem(BACKEND_URL_STORAGE_KEY, value);
+  } else {
+    localStorage.removeItem(BACKEND_URL_STORAGE_KEY);
+  }
+}
+
+function buildApiUrl(path) {
+  const baseUrl = getBackendBaseUrl();
+  if (!baseUrl) {
+    return path;
+  }
+  return `${baseUrl}${path}`;
+}
+
 async function request(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(buildApiUrl(path), {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
   });
@@ -21,6 +63,36 @@ function fillGrid(container, data) {
     item.innerHTML = `<strong>${key}</strong><br>${Array.isArray(value) ? value.join(",") : String(value)}`;
     container.appendChild(item);
   });
+}
+
+function updateBackendStatus(message) {
+  byId("backend-status").textContent = message;
+}
+
+function syncBackendForm() {
+  const form = byId("backend-form");
+  form.backend_url.value = getBackendBaseUrl();
+  const baseUrl = getBackendBaseUrl();
+  updateBackendStatus(baseUrl ? `Using backend: ${baseUrl}` : "Using current origin as backend");
+}
+
+async function applyBackendUrl(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  try {
+    const normalized = normalizeBackendBaseUrl(form.backend_url.value);
+    setBackendBaseUrl(normalized);
+    syncBackendForm();
+    await Promise.all([loadStatus(), loadConfig(), loadScript(), loadEvents(false)]);
+  } catch (error) {
+    updateBackendStatus(`Backend URL error: ${error.message}`);
+  }
+}
+
+async function resetBackendUrl() {
+  setBackendBaseUrl("");
+  syncBackendForm();
+  await Promise.all([loadStatus(), loadConfig(), loadScript(), loadEvents(false)]);
 }
 
 async function loadStatus() {
@@ -101,6 +173,8 @@ async function loadEvents(matchesOnly = false) {
 }
 
 async function init() {
+  byId("backend-form").addEventListener("submit", applyBackendUrl);
+  byId("reset-backend-url").addEventListener("click", resetBackendUrl);
   byId("refresh-status").addEventListener("click", loadStatus);
   byId("config-form").addEventListener("submit", saveConfig);
   byId("load-script").addEventListener("click", loadScript);
@@ -113,6 +187,7 @@ async function init() {
     button.addEventListener("click", () => runAction(button.dataset.action));
   });
 
+  syncBackendForm();
   await Promise.all([loadStatus(), loadConfig(), loadScript(), loadEvents(false)]);
 }
 

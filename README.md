@@ -76,6 +76,7 @@ python main.py serve-watch --db broadcast_events.sqlite3 --code-path ./example/t
 
 - `GET /health`: health check
 - `GET /`: built-in web dashboard (HTML/CSS/JS frontend for serve-watch APIs)
+  - Dashboard supports custom backend base URL (stored in browser localStorage), so frontend/backend can run on different domains.
 - `GET /api/status`: processing status and queue counters
 - `GET /api/script`: read current user script content
 - `PUT /api/script`: replace user script (`{"content":"...python code..."}`)
@@ -96,6 +97,8 @@ python main.py serve-watch --db broadcast_events.sqlite3 --code-path ./example/t
 - `GET /api/meta/config-schema`: runtime config schema metadata
 
 When `enabled=false`, background workers pause.
+
+`serve-watch` API responses include permissive CORS headers (`Access-Control-Allow-Origin: *`), and preflight `OPTIONS` requests are handled so that a frontend hosted on a different domain can call the backend APIs.
 
 `example/title_marker_filter.py` must define:
 

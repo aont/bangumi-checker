@@ -1385,8 +1385,20 @@ async def serve_watch_api(
                 raise web.HTTPNotFound(text="frontend not found")
             return web.FileResponse(index_path)
 
-        app = web.Application()
+        @web.middleware
+        async def cors_middleware(request: web.Request, handler):
+            if request.method == "OPTIONS":
+                response = web.Response(status=204)
+            else:
+                response = await handler(request)
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
+            return response
+
+        app = web.Application(middlewares=[cors_middleware])
         app.router.add_get("/", handle_frontend)
+        app.router.add_route("OPTIONS", "/{path_info:.*}", lambda _: web.Response(status=204))
         app.router.add_get("/health", handle_health)
         app.router.add_get("/api/status", handle_status)
         app.router.add_get("/api/script", handle_get_script)

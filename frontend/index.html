@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bangumi Checker Dashboard</title>
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
   <header>
@@ -13,6 +13,20 @@
   </header>
 
   <main>
+    <section class="card">
+      <h2>Backend Connection</h2>
+      <form id="backend-form" class="form-grid">
+        <label>Backend Base URL
+          <input type="url" name="backend_url" placeholder="http://127.0.0.1:8080">
+        </label>
+        <div class="button-row">
+          <button type="submit">Apply</button>
+          <button type="button" id="reset-backend-url">Use Current Origin</button>
+        </div>
+      </form>
+      <p id="backend-status" class="status-line"></p>
+    </section>
+
     <section class="card">
       <h2>Status</h2>
       <div id="status-grid" class="grid"></div>
@@ -74,6 +88,6 @@
     </section>
   </main>
 
-  <script src="./app.js" defer></script>
+  <script src="/static/app.js" defer></script>
 </body>
 </html>
