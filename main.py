@@ -1377,7 +1377,16 @@ async def serve_watch_api(
                 }
             )
 
+        frontend_dir = pathlib.Path(__file__).resolve().parent / "frontend"
+
+        async def handle_frontend(_: web.Request) -> web.Response:
+            index_path = frontend_dir / "index.html"
+            if not index_path.exists():
+                raise web.HTTPNotFound(text="frontend not found")
+            return web.FileResponse(index_path)
+
         app = web.Application()
+        app.router.add_get("/", handle_frontend)
         app.router.add_get("/health", handle_health)
         app.router.add_get("/api/status", handle_status)
         app.router.add_get("/api/script", handle_get_script)
@@ -1397,6 +1406,8 @@ async def serve_watch_api(
         app.router.add_get("/api/matches", handle_list_matches)
         app.router.add_get("/api/meta/terrestrial-groups", handle_meta_terrestrial_groups)
         app.router.add_get("/api/meta/config-schema", handle_meta_config_schema)
+        if frontend_dir.exists():
+            app.router.add_static("/static", frontend_dir)
 
         runner = web.AppRunner(app)
         await runner.setup()

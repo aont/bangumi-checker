@@ -75,6 +75,7 @@ python main.py serve-watch --db broadcast_events.sqlite3 --code-path ./example/t
 `serve-watch` starts the same periodic update/evaluation and detail-fetch workers as `watch`, and exposes APIs to operate at runtime:
 
 - `GET /health`: health check
+- `GET /`: built-in web dashboard (HTML/CSS/JS frontend for serve-watch APIs)
 - `GET /api/status`: processing status and queue counters
 - `GET /api/script`: read current user script content
 - `PUT /api/script`: replace user script (`{"content":"...python code..."}`)

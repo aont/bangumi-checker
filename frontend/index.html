@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bangumi Checker Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header>
+    <h1>Bangumi Checker</h1>
+    <p>serve-watch dashboard</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Status</h2>
+      <div id="status-grid" class="grid"></div>
+      <button id="refresh-status">Refresh Status</button>
+    </section>
+
+    <section class="card">
+      <h2>Config</h2>
+      <form id="config-form" class="form-grid">
+        <label>Timeout (s)<input type="number" name="timeout" min="1" required></label>
+        <label>Interval (hours)<input type="number" name="interval_hours" min="1" required></label>
+        <label>Terrestrial Group IDs (comma separated)
+          <input type="text" name="ggm_group_ids" placeholder="42,45" required>
+        </label>
+        <label>Code Path<input type="text" name="code_path" required></label>
+        <label class="checkbox"><input type="checkbox" name="enabled">Workers enabled</label>
+        <button type="submit">Save Config</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Script</h2>
+      <div class="button-row">
+        <button id="load-script">Load Script</button>
+        <button id="validate-script">Validate Script</button>
+      </div>
+      <textarea id="script-content" rows="14" spellcheck="false"></textarea>
+      <button id="save-script">Save Script</button>
+      <p id="script-status" class="status-line"></p>
+    </section>
+
+    <section class="card">
+      <h2>Actions</h2>
+      <div class="button-row wrap">
+        <button data-action="run-once">Run once</button>
+        <button data-action="fetch-details">Fetch details</button>
+        <button data-action="evaluate">Evaluate</button>
+        <button id="load-events">Load events</button>
+        <button id="load-matches">Load matches</button>
+      </div>
+      <p id="action-status" class="status-line"></p>
+    </section>
+
+    <section class="card">
+      <h2>Events</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Date</th>
+            <th>Title</th>
+            <th>Channel</th>
+            <th>Matched</th>
+            <th>Needs detail</th>
+          </tr>
+        </thead>
+        <tbody id="events-body"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
