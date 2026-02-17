@@ -1,28 +1,16 @@
 :root {
-  color-scheme: light dark;
   font-family: Inter, system-ui, sans-serif;
-  --bg: #f7f9fc;
+  --bg: #ffffff;
   --text: #1d2430;
   --muted: #55627a;
   --border: #d7deeb;
   --card-bg: #ffffff;
-  --surface-bg: #f2f5fb;
+  --surface-bg: #f8f9fc;
   --input-bg: #ffffff;
   --accent: #4f6fe8;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #10141a;
-    --text: #ecf0f7;
-    --muted: #b6c3e3;
-    --border: #2c3444;
-    --card-bg: #18202b;
-    --surface-bg: #0f141c;
-    --input-bg: #0f141c;
-    --accent: #7e9cff;
-  }
-}
+
 
 body {
   margin: 0;
@@ -106,4 +94,17 @@ th, td {
   padding: .45rem;
   border-bottom: 1px solid var(--border);
   text-align: left;
+}
+
+.CodeMirror {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1d2430;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.CodeMirror-gutters {
+  background: #ffffff;
+  border-right: 1px solid var(--border);
 }

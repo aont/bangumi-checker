@@ -1,5 +1,37 @@
 const byId = (id) => document.getElementById(id);
 
+let scriptEditor;
+
+function getScriptContent() {
+  return scriptEditor ? scriptEditor.getValue() : byId("script-content").value;
+}
+
+function setScriptContent(content) {
+  if (scriptEditor) {
+    scriptEditor.setValue(content);
+    scriptEditor.refresh();
+    return;
+  }
+  byId("script-content").value = content;
+}
+
+function initScriptEditor() {
+  if (typeof CodeMirror === "undefined") {
+    return;
+  }
+
+  scriptEditor = CodeMirror.fromTextArea(byId("script-content"), {
+    mode: "python",
+    lineNumbers: true,
+    theme: "default",
+    indentUnit: 4,
+    tabSize: 4,
+    lineWrapping: false,
+  });
+
+  scriptEditor.setSize("100%", "340px");
+}
+
 const BACKEND_URL_STORAGE_KEY = "bangumi-checker.backend-base-url";
 
 function normalizeBackendBaseUrl(rawValue) {
@@ -126,18 +158,18 @@ async function saveConfig(event) {
 
 async function loadScript() {
   const data = await request("/api/script");
-  byId("script-content").value = data.content || "";
+  setScriptContent(data.content || "");
   byId("script-status").textContent = "Loaded script";
 }
 
 async function saveScript() {
-  const content = byId("script-content").value;
+  const content = getScriptContent();
   await request("/api/script", { method: "PUT", body: JSON.stringify({ content }) });
   byId("script-status").textContent = "Saved script";
 }
 
 async function validateScript() {
-  const content = byId("script-content").value;
+  const content = getScriptContent();
   const result = await request("/api/script/validate", { method: "POST", body: JSON.stringify({ content }) });
   byId("script-status").textContent = result.ok ? "Validation OK" : "Validation failed";
 }
@@ -181,6 +213,8 @@ async function init() {
   byId("save-script").addEventListener("click", saveScript);
   byId("validate-script").addEventListener("click", validateScript);
   byId("load-events").addEventListener("click", () => loadEvents(false));
+
+  initScriptEditor();
   byId("load-matches").addEventListener("click", () => loadEvents(true));
 
   document.querySelectorAll("button[data-action]").forEach((button) => {
