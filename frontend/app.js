@@ -51,7 +51,8 @@ function normalizeBackendBaseUrl(rawValue) {
     throw new Error("Backend URL must start with http:// or https://");
   }
 
-  return parsed.origin;
+  const pathname = parsed.pathname.replace(/\/+$/, "");
+  return `${parsed.origin}${pathname}`;
 }
 
 function getBackendBaseUrl() {
