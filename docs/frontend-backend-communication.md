@@ -2,7 +2,7 @@
 
 ## Backend Address Selection
 
-- The frontend uses the Base URL stored in `localStorage` under the key `bangumi-checker.backend-base-url`.
+- The frontend uses the Base URL stored in `localStorage` under the key `bangumiChecker.backendBaseUrl`.
 - If no Base URL is configured, it uses relative paths (`/api/...`), so requests go to a backend on the same origin as the frontend.
 - The default `serve-watch` bind address is `127.0.0.1:8080`.
 

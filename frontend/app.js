@@ -32,7 +32,7 @@ function initScriptEditor() {
   scriptEditor.setSize("100%", "340px");
 }
 
-const BACKEND_URL_STORAGE_KEY = "bangumi-checker.backend-base-url";
+const BACKEND_URL_STORAGE_KEY = "bangumiChecker.backendBaseUrl";
 
 function normalizeBackendBaseUrl(rawValue) {
   const value = (rawValue || "").trim();
